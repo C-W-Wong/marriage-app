@@ -139,6 +139,7 @@ app.use(express.json({ limit: '1mb' }));
 const staticSecurityHeaders = (res: express.Response) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 };
 app.use('/uploads', express.static(uploadsDir, { setHeaders: staticSecurityHeaders }));
 app.use('/gallery-images', express.static(galleryDir, { setHeaders: staticSecurityHeaders }));
@@ -424,7 +425,7 @@ app.post('/api/guest-book/:id/reply', writeLimiter, (req, res) => {
 app.get('/api/rsvp/:guest_id', (req, res) => {
   const guestId = parseIntParam(req.params.guest_id);
   if (guestId === null) { res.status(400).json({ error: 'Invalid guest ID' }); return; }
-  const rsvp = db.prepare('SELECT id, name, attending, message, created_at FROM rsvp WHERE guest_id = ? ORDER BY created_at DESC LIMIT 1').get(guestId);
+  const rsvp = db.prepare('SELECT id, name, attending, created_at FROM rsvp WHERE guest_id = ? ORDER BY created_at DESC LIMIT 1').get(guestId);
   if (!rsvp) { res.status(404).json({ error: 'No RSVP found' }); return; }
   res.json(rsvp);
 });
