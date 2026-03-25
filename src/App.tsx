@@ -244,7 +244,6 @@ const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: Gue
   );
 };
 
-// #18: TikTok-style swipeable wishes
 const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
   entries: GuestBookEntry[];
   userName: string;
@@ -266,16 +265,16 @@ const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
         <motion.div
           key={display[safeIdx].id}
           custom={dir}
-          initial={{ y: dir > 0 ? 200 : -200, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: dir > 0 ? -200 : 200, opacity: 0 }}
+          initial={{ x: dir > 0 ? 300 : -300, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={{ x: dir > 0 ? -300 : 300, opacity: 0 }}
           transition={{ duration: 0.25, ease: 'easeInOut' }}
-          drag="y"
-          dragConstraints={{ top: 0, bottom: 0 }}
+          drag="x"
+          dragConstraints={{ left: 0, right: 0 }}
           dragElastic={0.15}
           onDragEnd={(_, info) => {
-            if (info.offset.y < -60) goNext();
-            else if (info.offset.y > 60) goPrev();
+            if (info.offset.x < -60) goNext();
+            else if (info.offset.x > 60) goPrev();
           }}
           className="cursor-grab active:cursor-grabbing"
         >
@@ -292,7 +291,7 @@ const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
         ))}
         {display.length > 10 && <span className="text-[10px] text-gray-300 ml-1">+{display.length - 10}</span>}
       </div>
-      <p className="text-center text-[10px] text-gray-300 mt-2 font-serif">Swipe up or down to read more</p>
+      <p className="text-center text-[10px] text-gray-300 mt-2 font-serif">Swipe left or right to read more</p>
       {entries.length > 1 && (
         <div className="text-center mt-3">
           <button onClick={onViewAll} className="text-xs font-serif uppercase tracking-widest text-[#8b0000] hover:underline transition-colors">
@@ -312,8 +311,7 @@ const PLAYLIST = [
 
 const CAN_HOVER = window.matchMedia('(hover: hover)').matches;
 
-const IS_MOBILE = !window.matchMedia('(hover: hover)').matches;
-const PETAL_CONFIGS = Array.from({ length: IS_MOBILE ? 6 : 15 }, (_, i) => ({
+const PETAL_CONFIGS = Array.from({ length: CAN_HOVER ? 15 : 6 }, (_, i) => ({
   startLeft: `${Math.random() * 100}%`,
   endLeft: `${Math.random() * 100 + (Math.random() * 20 - 10)}%`,
   duration: 12 + Math.random() * 8,
@@ -344,7 +342,7 @@ export default function App() {
   const [step, setStep] = useState<'intro' | 'doors' | 'invitation'>(shouldSkipIntro ? 'invitation' : 'intro');
   const [hasStarted, setHasStarted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playerOpen, setPlayerOpen] = useState(false);
+  const [playerOpen, setPlayerOpen] = useState(shouldSkipIntro);
   const [fabOpen, setFabOpen] = useState(false);
   const [showVenueModal, setShowVenueModal] = useState(false);
   const [showWeatherModal, setShowWeatherModal] = useState(false);
@@ -382,6 +380,13 @@ export default function App() {
     }
     setGuestBookErrors(prev => ({ ...prev, [field]: error }));
     return error === '';
+  };
+
+  const MAX_MEDIA_SIZE = 50 * 1024 * 1024;
+  const handleGuestBookFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.size > MAX_MEDIA_SIZE) { e.target.value = ''; return; }
+    if (file) setGuestBookPhoto(file);
   };
 
   const handleGuestBookChange = (field: string, value: string) => {
@@ -444,7 +449,6 @@ export default function App() {
   };
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  // #10: Preload typing sound immediately
   useEffect(() => {
     const preload = new Audio('/keyboard-typing.wav');
     preload.preload = 'auto';
@@ -657,7 +661,6 @@ export default function App() {
       }, 3500);
       return () => clearTimeout(timer);
     }
-    // #16: Cache intro completion for 12 hours
     if (step === 'invitation') {
       try { localStorage.setItem('intro_expiry', String(Date.now() + 12 * 60 * 60 * 1000)); } catch {}
     }
@@ -737,7 +740,7 @@ export default function App() {
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={() => {
-                  // #3: Unlock audio for Safari — must happen in user gesture
+                  // Unlock audio for Safari — must happen in user gesture
                   const audio = audioRef.current;
                   if (audio) {
                     audio.play().then(() => audio.pause()).catch(() => {});
@@ -1554,14 +1557,7 @@ export default function App() {
                                     type="file"
                                     accept="image/*,video/mp4,video/quicktime,video/webm"
                                     className="hidden"
-                                    onChange={(e) => {
-                                      const file = e.target.files?.[0];
-                                      if (file && file.size > 50 * 1024 * 1024) {
-                                        e.target.value = '';
-                                        return;
-                                      }
-                                      if (file) setGuestBookPhoto(file);
-                                    }}
+                                    onChange={handleGuestBookFile}
                                   />
                                   <span className="text-xs font-serif text-gray-400">Photo or Video</span>
                                 </label>
@@ -1571,14 +1567,7 @@ export default function App() {
                                     accept="video/*"
                                     capture="environment"
                                     className="hidden"
-                                    onChange={(e) => {
-                                      const file = e.target.files?.[0];
-                                      if (file && file.size > 50 * 1024 * 1024) {
-                                        e.target.value = '';
-                                        return;
-                                      }
-                                      if (file) setGuestBookPhoto(file);
-                                    }}
+                                    onChange={handleGuestBookFile}
                                   />
                                   <span className="text-xs font-serif text-gray-400">Record</span>
                                 </label>

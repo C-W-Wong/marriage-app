@@ -7,10 +7,8 @@ const addressParts = venue.address.split(', ');
 const addressLine1 = addressParts[0];
 const addressLine2 = addressParts.slice(1).join(', ');
 
-// #1: Use www.google.com for better mobile embed support
 const mapEmbedUrl = `https://www.google.com/maps?q=${venue.lat},${venue.lng}&z=16&output=embed`;
 
-// #7: Handle navigation with proper iOS support
 function handleNavigate() {
   const ua = navigator.userAgent;
   const isIOS = /iPad|iPhone|iPod/.test(ua) ||

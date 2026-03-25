@@ -136,25 +136,13 @@ app.use(cors({
 
 app.use(express.json({ limit: '1mb' }));
 
-// #5/#6: Serve uploads with nosniff and attachment disposition for safety
-app.use('/uploads', express.static(uploadsDir, {
-  setHeaders: (res) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
-  },
-}));
-app.use('/gallery-images', express.static(galleryDir, {
-  setHeaders: (res) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
-  },
-}));
-app.use('/wedding-photos', express.static(weddingPhotosDir, {
-  setHeaders: (res) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
-  },
-}));
+const staticSecurityHeaders = (res: express.Response) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+};
+app.use('/uploads', express.static(uploadsDir, { setHeaders: staticSecurityHeaders }));
+app.use('/gallery-images', express.static(galleryDir, { setHeaders: staticSecurityHeaders }));
+app.use('/wedding-photos', express.static(weddingPhotosDir, { setHeaders: staticSecurityHeaders }));
 
 // #4: Rate limiting
 const loginLimiter = rateLimit({
