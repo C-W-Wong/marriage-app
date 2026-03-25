@@ -353,6 +353,7 @@ export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [rsvpStatus, setRsvpStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [hasRsvped, setHasRsvped] = useState(false);
+  const [rsvpChecked, setRsvpChecked] = useState(false);
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
   const [guestBookEntries, setGuestBookEntries] = useState<GuestBookEntry[]>([]);
   const [guestBookData, setGuestBookData] = useState({ name: '', message: '' });
@@ -479,7 +480,8 @@ export default function App() {
             setRsvpData(prev => ({ ...prev, attending: !!rsvp.attending }));
             setHasRsvped(true);
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => setRsvpChecked(true));
       })
       .catch(() => setGuestStatus('invalid'));
   }, []);
@@ -971,7 +973,11 @@ export default function App() {
                   className="h-px w-24 md:w-32 bg-[#c5a059] mx-auto my-6 md:my-8"
                 />
 
-                {hasRsvped ? (
+                {!rsvpChecked ? (
+                  <div className="w-full flex justify-center py-4">
+                    <div className="w-5 h-5 border-2 border-[#c5a059]/30 border-t-[#c5a059] rounded-full animate-spin" />
+                  </div>
+                ) : hasRsvped ? (
                   <div className="w-full text-center space-y-3">
                     <div className="flex items-center justify-center gap-2 text-sm font-serif">
                       <CheckCircle2 size={16} className="text-green-500" />
