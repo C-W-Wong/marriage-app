@@ -241,9 +241,9 @@ const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: Gue
 };
 
 const PLAYLIST = [
-  { src: '/take-turns.wav', title: 'Take Turns' },
-  { src: '/every-road.wav', title: 'Every Road' },
-  { src: '/that-sunny-day.wav', title: 'That Sunny Day' },
+  { src: '/take-turns.mp3', title: 'Take Turns' },
+  { src: '/every-road.mp3', title: 'Every Road' },
+  { src: '/that-sunny-day.mp3', title: 'That Sunny Day' },
 ];
 
 const CAN_HOVER = window.matchMedia('(hover: hover)').matches;
