@@ -631,20 +631,17 @@ export default function App() {
     ? `Dear ${guestInfo.name},\n\nWe cordially invite you to celebrate the union of Chris Wong & Eileen Liu and the beginning of our life together.\n\n— With love, Chris & Eileen`
     : "Dear Friend,\n\nWe cordially invite you to celebrate the union of Chris Wong & Eileen Liu and the beginning of our life together.\n\n— With love, Chris & Eileen";
 
-  useEffect(() => {
+  // Play/pause directly in user gesture context (Safari requires this)
+  const togglePlay = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio || !isReady) return;
-
+    if (!audio) return;
     if (isPlaying) {
-      audio.play().catch(error => {
-        if (error.name !== 'AbortError') {
-          setIsPlaying(false);
-        }
-      });
-    } else {
       audio.pause();
+      setIsPlaying(false);
+    } else {
+      audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     }
-  }, [isPlaying, isReady]);
+  }, [isPlaying]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -657,7 +654,9 @@ export default function App() {
     if (step === 'doors') {
       const timer = setTimeout(() => {
         setStep('invitation');
-        setIsPlaying(true);
+        // Audio was unlocked on "Open Invitation" click, so play() works here
+        const audio = audioRef.current;
+        if (audio) audio.play().then(() => setIsPlaying(true)).catch(() => {});
       }, 3500);
       return () => clearTimeout(timer);
     }
@@ -2005,7 +2004,7 @@ export default function App() {
                 >
                   {/* Album art / Play button */}
                   <button
-                    onClick={(e) => { e.stopPropagation(); setIsPlaying(prev => !prev); }}
+                    onClick={(e) => { e.stopPropagation(); togglePlay(); }}
                     className="relative w-10 h-10 rounded-xl flex-shrink-0 group"
                     aria-label={isPlaying ? 'Pause music' : 'Play music'}
                   >
