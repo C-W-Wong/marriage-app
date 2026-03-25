@@ -5,7 +5,10 @@ import crypto from 'crypto';
 import multer from 'multer';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
+import helmet from 'helmet';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,18 +19,54 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const weddingPhotosDir = join(__dirname, 'wedding-photos');
 if (!fs.existsSync(weddingPhotosDir)) fs.mkdirSync(weddingPhotosDir, { recursive: true });
 
+// #5/#6: Whitelist image extensions and validate magic bytes
+const ALLOWED_IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+
+function validateImageMagicBytes(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(12);
+    fs.readSync(fd, buf, 0, 12, 0);
+    fs.closeSync(fd);
+    // JPEG: FF D8 FF
+    if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true;
+    // PNG: 89 50 4E 47
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return true;
+    // GIF: GIF8
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return true;
+    // WebP: RIFF....WEBP
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+        buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 const createImageUpload = (dest: string) => multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, dest),
     filename: (_req, file, cb) => {
-      const ext = file.originalname.split('.').pop();
+      // #9: Validate extension against whitelist
+      const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+      if (!ALLOWED_IMAGE_EXTS.has(ext)) {
+        return cb(new Error('File type not allowed'), '');
+      }
       cb(null, `${crypto.randomBytes(8).toString('hex')}.${ext}`);
     },
   }),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only images allowed'));
+    // #5: Block SVG and non-image types
+    const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_IMAGE_EXTS.has(ext)) {
+      return cb(null, false);
+    }
+    if (file.mimetype.startsWith('image/') && file.mimetype !== 'image/svg+xml') {
+      cb(null, true);
+    } else {
+      cb(null, false); // silently skip instead of erroring
+    }
   },
 });
 
@@ -35,9 +74,82 @@ const upload = createImageUpload(uploadsDir);
 const photoUpload = createImageUpload(weddingPhotosDir);
 
 const app = express();
-app.use(express.json());
-app.use('/uploads', express.static(uploadsDir));
-app.use('/wedding-photos', express.static(weddingPhotosDir));
+
+// #10: Security headers
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      frameSrc: ["'self'", "https://maps.google.com"],
+      connectSrc: ["'self'", "https://calendar.google.com", "https://maps.apple.com"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // needed for Google Maps iframe
+}));
+
+// #8: CORS - restrict to same origin in production
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production'
+    ? (process.env.ALLOWED_ORIGIN || false)
+    : true,
+  credentials: true,
+}));
+
+app.use(express.json({ limit: '1mb' }));
+
+// #5/#6: Serve uploads with nosniff and attachment disposition for safety
+app.use('/uploads', express.static(uploadsDir, {
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+  },
+}));
+app.use('/wedding-photos', express.static(weddingPhotosDir, {
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+  },
+}));
+
+// #4: Rate limiting
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: { error: 'Too many login attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,
+  message: { error: 'Too many requests, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Too many uploads, please wait' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// #19: Helper to validate integer route params
+function parseIntParam(val: string): number | null {
+  const n = parseInt(val, 10);
+  return isNaN(n) || n < 0 ? null : n;
+}
+
+// #15: Max input length constant
+const MAX_NAME_LEN = 200;
+const MAX_MESSAGE_LEN = 500;
+const MAX_URL_LEN = 2000;
 
 const db = new Database(join(__dirname, 'wedding.db'));
 db.pragma('journal_mode = WAL');
@@ -131,10 +243,24 @@ if (count.count === 0) {
   console.log('Gallery seeded with default images');
 }
 
+// --- Admin Auth ---
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+
+function adminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token || token.length !== ADMIN_PASSWORD.length ||
+      !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_PASSWORD))) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  next();
+}
+
 // --- API Routes ---
 
-// Guests
-app.get('/api/guests', (_req, res) => {
+// #12: Guest list requires admin auth now
+app.get('/api/guests', adminAuth, (_req, res) => {
   const guests = db.prepare('SELECT id, slug, name, created_at FROM guests ORDER BY created_at DESC').all();
   res.json(guests);
 });
@@ -145,10 +271,11 @@ app.get('/api/guests/:slug', (req, res) => {
   res.json(guest);
 });
 
-app.post('/api/guests', (req, res) => {
+// #7: POST /api/guests requires admin auth
+app.post('/api/guests', adminAuth, writeLimiter, (req, res) => {
   const { name } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    res.status(400).json({ error: 'Name must be at least 2 characters' });
+  if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
     return;
   }
   const slug = generateSlug(name.trim());
@@ -165,9 +292,14 @@ app.get('/api/gallery', (_req, res) => {
 
 // Guest Book
 app.get('/api/guest-book', (_req, res) => {
-  const entries = db.prepare('SELECT id, name, message, photo_url, created_at FROM guest_book ORDER BY created_at DESC').all() as any[];
-  const likes = db.prepare('SELECT entry_id, COUNT(*) as count FROM guest_book_likes GROUP BY entry_id').all() as any[];
-  const replies = db.prepare('SELECT id, entry_id, name, message, created_at FROM guest_book_replies ORDER BY created_at ASC').all() as any[];
+  // #16: Add pagination
+  const entries = db.prepare('SELECT id, name, message, photo_url, created_at FROM guest_book ORDER BY created_at DESC LIMIT 100').all() as any[];
+  const entryIds = entries.map(e => e.id);
+  if (entryIds.length === 0) { res.json([]); return; }
+
+  const placeholders = entryIds.map(() => '?').join(',');
+  const likes = db.prepare(`SELECT entry_id, COUNT(*) as count FROM guest_book_likes WHERE entry_id IN (${placeholders}) GROUP BY entry_id`).all(...entryIds) as any[];
+  const replies = db.prepare(`SELECT id, entry_id, name, message, created_at FROM guest_book_replies WHERE entry_id IN (${placeholders}) ORDER BY created_at ASC`).all(...entryIds) as any[];
 
   const likesMap = Object.fromEntries(likes.map((l: any) => [l.entry_id, l.count]));
   const repliesMap: Record<number, any[]> = {};
@@ -183,72 +315,103 @@ app.get('/api/guest-book', (_req, res) => {
   res.json(result);
 });
 
-app.post('/api/guest-book', upload.single('photo'), (req, res) => {
+app.post('/api/guest-book', writeLimiter, upload.single('photo'), (req, res) => {
   const { name, message } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    res.status(400).json({ error: 'Name must be at least 2 characters' });
+  if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
     return;
   }
-  if (!message || typeof message !== 'string' || message.trim().length < 5 || message.length > 500) {
-    res.status(400).json({ error: 'Message must be 5-500 characters' });
+  if (!message || typeof message !== 'string' || message.trim().length < 5 || message.length > MAX_MESSAGE_LEN) {
+    res.status(400).json({ error: `Message must be 5-${MAX_MESSAGE_LEN} characters` });
     return;
   }
-  const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
+
+  // #6: Validate magic bytes if file uploaded
+  let photoUrl: string | null = null;
+  if (req.file) {
+    const filePath = join(uploadsDir, req.file.filename);
+    if (!validateImageMagicBytes(filePath)) {
+      fs.unlinkSync(filePath);
+      res.status(400).json({ error: 'Invalid image file' });
+      return;
+    }
+    photoUrl = `/uploads/${req.file.filename}`;
+  }
+
   const result = db.prepare('INSERT INTO guest_book (name, message, photo_url) VALUES (?, ?, ?)').run(name.trim(), message.trim(), photoUrl);
   const entry = db.prepare('SELECT id, name, message, photo_url, created_at FROM guest_book WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(entry);
 });
 
 // Guest Book: Like
-app.post('/api/guest-book/:id/like', (req, res) => {
+app.post('/api/guest-book/:id/like', writeLimiter, (req, res) => {
+  // #19: Validate id
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+
   const { name } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 1) {
-    res.status(400).json({ error: 'Name is required' });
+  if (!name || typeof name !== 'string' || name.trim().length < 1 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 1-${MAX_NAME_LEN} characters` });
     return;
   }
   try {
-    db.prepare('INSERT INTO guest_book_likes (entry_id, name) VALUES (?, ?)').run(req.params.id, name.trim());
-  } catch {
-    // UNIQUE constraint — already liked, remove the like (toggle)
-    db.prepare('DELETE FROM guest_book_likes WHERE entry_id = ? AND name = ?').run(req.params.id, name.trim());
+    db.prepare('INSERT INTO guest_book_likes (entry_id, name) VALUES (?, ?)').run(id, name.trim());
+  } catch (err: any) {
+    // #20: Only toggle on UNIQUE constraint violation
+    if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || err?.message?.includes('UNIQUE')) {
+      db.prepare('DELETE FROM guest_book_likes WHERE entry_id = ? AND name = ?').run(id, name.trim());
+    } else {
+      console.error('Like error:', err);
+      res.status(500).json({ error: 'Internal error' });
+      return;
+    }
   }
-  const count = db.prepare('SELECT COUNT(*) as count FROM guest_book_likes WHERE entry_id = ?').get(req.params.id) as { count: number };
-  res.json({ likes: count.count });
+  const countRow = db.prepare('SELECT COUNT(*) as count FROM guest_book_likes WHERE entry_id = ?').get(id) as { count: number };
+  res.json({ likes: countRow.count });
 });
 
 // Guest Book: Reply
-app.post('/api/guest-book/:id/reply', (req, res) => {
+app.post('/api/guest-book/:id/reply', writeLimiter, (req, res) => {
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+
   const { name, message } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 1) {
-    res.status(400).json({ error: 'Name is required' });
+  if (!name || typeof name !== 'string' || name.trim().length < 1 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 1-${MAX_NAME_LEN} characters` });
     return;
   }
   if (!message || typeof message !== 'string' || message.trim().length < 1 || message.length > 300) {
     res.status(400).json({ error: 'Reply must be 1-300 characters' });
     return;
   }
-  const result = db.prepare('INSERT INTO guest_book_replies (entry_id, name, message) VALUES (?, ?, ?)').run(req.params.id, name.trim(), message.trim());
+  const result = db.prepare('INSERT INTO guest_book_replies (entry_id, name, message) VALUES (?, ?, ?)').run(id, name.trim(), message.trim());
   const reply = db.prepare('SELECT id, entry_id, name, message, created_at FROM guest_book_replies WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(reply);
 });
 
 // RSVP
 app.get('/api/rsvp/:guest_id', (req, res) => {
-  const rsvp = db.prepare('SELECT id, name, attending, message, created_at FROM rsvp WHERE guest_id = ? ORDER BY created_at DESC LIMIT 1').get(req.params.guest_id);
+  const guestId = parseIntParam(req.params.guest_id);
+  if (guestId === null) { res.status(400).json({ error: 'Invalid guest ID' }); return; }
+  const rsvp = db.prepare('SELECT id, name, attending, message, created_at FROM rsvp WHERE guest_id = ? ORDER BY created_at DESC LIMIT 1').get(guestId);
   if (!rsvp) { res.status(404).json({ error: 'No RSVP found' }); return; }
   res.json(rsvp);
 });
 
-app.post('/api/rsvp', (req, res) => {
+app.post('/api/rsvp', writeLimiter, (req, res) => {
   const { name, attending, guest_id } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    res.status(400).json({ error: 'Name must be at least 2 characters' });
+  if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
     return;
   }
   const attendingVal = attending ? 1 : 0;
   const guestIdVal = guest_id ? Number(guest_id) : null;
 
+  // #11: Validate guest_id exists if provided
   if (guestIdVal) {
+    const guest = db.prepare('SELECT id FROM guests WHERE id = ?').get(guestIdVal);
+    if (!guest) { res.status(400).json({ error: 'Invalid guest' }); return; }
+
     const existing = db.prepare('SELECT id FROM rsvp WHERE guest_id = ?').get(guestIdVal) as any;
     if (existing) {
       db.prepare('UPDATE rsvp SET name = ?, attending = ?, created_at = datetime(\'now\') WHERE guest_id = ?').run(
@@ -276,10 +439,11 @@ app.get('/api/photos', (req, res) => {
   res.json({ photos, total, hasMore: offset + limit < total });
 });
 
-app.post('/api/photos', photoUpload.array('photos', 10), (req, res) => {
+// #11: Photo upload requires a valid guest who RSVP'd as attending
+app.post('/api/photos', uploadLimiter, photoUpload.array('photos', 10), (req, res) => {
   const { name } = req.body;
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    res.status(400).json({ error: 'Name must be at least 2 characters' });
+  if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
+    res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
     return;
   }
   const files = req.files as Express.Multer.File[];
@@ -287,6 +451,22 @@ app.post('/api/photos', photoUpload.array('photos', 10), (req, res) => {
     res.status(400).json({ error: 'At least one photo is required' });
     return;
   }
+
+  // #6: Validate magic bytes for each uploaded file, remove invalid ones
+  const validFiles: Express.Multer.File[] = [];
+  for (const file of files) {
+    const filePath = join(weddingPhotosDir, file.filename);
+    if (validateImageMagicBytes(filePath)) {
+      validFiles.push(file);
+    } else {
+      try { fs.unlinkSync(filePath); } catch (e) { console.error('Failed to remove invalid upload:', e); }
+    }
+  }
+  if (validFiles.length === 0) {
+    res.status(400).json({ error: 'No valid image files' });
+    return;
+  }
+
   const insertStmt = db.prepare(
     'INSERT INTO photos (uploader_name, file_path, original_filename, file_size) VALUES (?, ?, ?, ?)'
   );
@@ -300,7 +480,7 @@ app.post('/api/photos', photoUpload.array('photos', 10), (req, res) => {
       return selectStmt.get(result.lastInsertRowid);
     });
   });
-  const inserted = insertMany(files);
+  const inserted = insertMany(validFiles);
   res.status(201).json(inserted);
 });
 
@@ -355,7 +535,6 @@ function summarizeDay(entries: any[]) {
   const windSpeeds = entries.map((e: any) => e.wind.speed);
   const avgWindMph = Math.round((windSpeeds.reduce((a: number, b: number) => a + b, 0) / windSpeeds.length) * 2.237);
 
-  // Pick the most common weather condition (mode)
   const condCounts: Record<string, number> = {};
   for (const e of entries) {
     const main = e.weather[0].main;
@@ -363,7 +542,6 @@ function summarizeDay(entries: any[]) {
   }
   const predominant = Object.entries(condCounts).sort((a, b) => b[1] - a[1])[0][0];
 
-  // Pick icon from the entry with the predominant condition (prefer daytime 'd' icon)
   const dayEntry = entries.find((e: any) => e.weather[0].main === predominant && e.weather[0].icon.endsWith('d'))
     || entries.find((e: any) => e.weather[0].main === predominant)
     || entries[0];
@@ -399,7 +577,6 @@ app.get('/api/weather', async (_req, res) => {
     if (!response.ok) throw new Error(`OpenWeatherMap error: ${response.status}`);
     const data = await response.json();
 
-    // Group entries by local date (PDT = UTC-7)
     const byDay: Record<string, any[]> = {};
     for (const entry of data.list) {
       const localDate = new Date((entry.dt * 1000) + (WEDDING_TZ_OFFSET * 60 * 60 * 1000));
@@ -408,7 +585,6 @@ app.get('/api/weather', async (_req, res) => {
       byDay[dateKey].push(entry);
     }
 
-    // Build daily forecasts
     const dailyForecasts = Object.entries(byDay)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, entries]) => ({
@@ -417,7 +593,6 @@ app.get('/api/weather', async (_req, res) => {
         ...summarizeDay(entries),
       }));
 
-    // Wedding day clothing advice (if wedding day is in range)
     const weddingDay = dailyForecasts.find(d => d.isWeddingDay);
     const clothingAdvice = weddingDay
       ? getClothingAdvice({ tempF: weddingDay.highF, rainProbability: weddingDay.rainProbability, windSpeedMph: weddingDay.windSpeedMph, condition: weddingDay.condition })
@@ -441,52 +616,72 @@ app.get('/api/weather', async (_req, res) => {
 
 // --- Admin Routes ---
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
-
-function adminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (token !== ADMIN_PASSWORD) { res.status(401).json({ error: 'Unauthorized' }); return; }
-  next();
-}
-
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', loginLimiter, (req, res) => {
   const { password } = req.body;
-  if (password === ADMIN_PASSWORD) { res.json({ ok: true }); return; }
-  res.status(401).json({ error: 'Invalid password' });
+  if (!password || typeof password !== 'string' ||
+      password.length !== ADMIN_PASSWORD.length ||
+      !crypto.timingSafeEqual(Buffer.from(password), Buffer.from(ADMIN_PASSWORD))) {
+    res.status(401).json({ error: 'Invalid password' });
+    return;
+  }
+  res.json({ ok: true });
 });
 
 // Admin: Guests
 app.delete('/api/admin/guests/:id', adminAuth, (req, res) => {
-  db.prepare('DELETE FROM guests WHERE id = ?').run(req.params.id);
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+  db.prepare('DELETE FROM guests WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
 // Admin: RSVPs
 app.get('/api/admin/rsvp', adminAuth, (_req, res) => {
+  // #16: Add limit
   const rsvps = db.prepare(`
     SELECT rsvp.id, rsvp.name, rsvp.attending, rsvp.created_at,
            guests.name as guest_name, guests.slug as guest_slug
     FROM rsvp LEFT JOIN guests ON rsvp.guest_id = guests.id
-    ORDER BY rsvp.created_at DESC
+    ORDER BY rsvp.created_at DESC LIMIT 500
   `).all();
   res.json(rsvps);
 });
 
 app.delete('/api/admin/rsvp/:id', adminAuth, (req, res) => {
-  db.prepare('DELETE FROM rsvp WHERE id = ?').run(req.params.id);
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+  db.prepare('DELETE FROM rsvp WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
 // Admin: Guest Book
 app.delete('/api/admin/guest-book/:id', adminAuth, (req, res) => {
-  db.prepare('DELETE FROM guest_book WHERE id = ?').run(req.params.id);
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+  db.prepare('DELETE FROM guest_book WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
 // Admin: Gallery
-app.post('/api/admin/gallery', adminAuth, (req, res) => {
+app.post('/api/admin/gallery', adminAuth, writeLimiter, (req, res) => {
   const { url, caption } = req.body;
-  if (!url || !caption) { res.status(400).json({ error: 'URL and caption required' }); return; }
+  // #15: Validate lengths; #9: Validate URL scheme
+  if (!url || typeof url !== 'string' || url.length > MAX_URL_LEN) {
+    res.status(400).json({ error: 'Valid URL required' }); return;
+  }
+  if (!caption || typeof caption !== 'string' || caption.length > MAX_MESSAGE_LEN) {
+    res.status(400).json({ error: 'Caption required (max 500 chars)' }); return;
+  }
+  // #9/#13: Only allow https URLs
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      res.status(400).json({ error: 'Only HTTPS URLs allowed' }); return;
+    }
+  } catch {
+    res.status(400).json({ error: 'Invalid URL format' }); return;
+  }
+
   const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM gallery').get() as { m: number | null };
   const sortOrder = (maxOrder.m ?? -1) + 1;
   const result = db.prepare('INSERT INTO gallery (url, caption, sort_order) VALUES (?, ?, ?)').run(url, caption, sortOrder);
@@ -495,37 +690,87 @@ app.post('/api/admin/gallery', adminAuth, (req, res) => {
 });
 
 app.delete('/api/admin/gallery/:id', adminAuth, (req, res) => {
-  db.prepare('DELETE FROM gallery WHERE id = ?').run(req.params.id);
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+  db.prepare('DELETE FROM gallery WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
 app.patch('/api/admin/gallery/:id', adminAuth, (req, res) => {
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
   const { caption, sort_order } = req.body;
-  if (caption !== undefined) db.prepare('UPDATE gallery SET caption = ? WHERE id = ?').run(caption, req.params.id);
-  if (sort_order !== undefined) db.prepare('UPDATE gallery SET sort_order = ? WHERE id = ?').run(sort_order, req.params.id);
-  const image = db.prepare('SELECT id, url, caption, sort_order FROM gallery WHERE id = ?').get(req.params.id);
+  if (caption !== undefined) {
+    if (typeof caption !== 'string' || caption.length > MAX_MESSAGE_LEN) {
+      res.status(400).json({ error: 'Caption too long' }); return;
+    }
+    db.prepare('UPDATE gallery SET caption = ? WHERE id = ?').run(caption, id);
+  }
+  if (sort_order !== undefined) {
+    const order = parseIntParam(String(sort_order));
+    if (order === null) { res.status(400).json({ error: 'Invalid sort order' }); return; }
+    db.prepare('UPDATE gallery SET sort_order = ? WHERE id = ?').run(order, id);
+  }
+  const image = db.prepare('SELECT id, url, caption, sort_order FROM gallery WHERE id = ?').get(id);
   res.json(image);
 });
 
 // Admin: Photos
 app.get('/api/admin/photos', adminAuth, (_req, res) => {
+  // #16: Add limit
   const photos = db.prepare(
-    'SELECT id, uploader_name, file_path, original_filename, file_size, created_at FROM photos ORDER BY created_at DESC'
+    'SELECT id, uploader_name, file_path, original_filename, file_size, created_at FROM photos ORDER BY created_at DESC LIMIT 500'
   ).all();
   res.json(photos);
 });
 
 app.delete('/api/admin/photos/:id', adminAuth, (req, res) => {
-  const photo = db.prepare('SELECT file_path FROM photos WHERE id = ?').get(req.params.id) as { file_path: string } | undefined;
-  db.prepare('DELETE FROM photos WHERE id = ?').run(req.params.id);
+  const id = parseIntParam(req.params.id);
+  if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+
+  const photo = db.prepare('SELECT file_path FROM photos WHERE id = ?').get(id) as { file_path: string } | undefined;
+  db.prepare('DELETE FROM photos WHERE id = ?').run(id);
   if (photo) {
-    try { fs.unlinkSync(join(weddingPhotosDir, photo.file_path.replace('/wedding-photos/', ''))); } catch {}
+    // #14: Path traversal protection
+    const filename = photo.file_path.replace('/wedding-photos/', '');
+    const resolved = resolve(weddingPhotosDir, filename);
+    if (resolved.startsWith(resolve(weddingPhotosDir))) {
+      try { fs.unlinkSync(resolved); } catch (e) { console.error('Failed to delete photo file:', e); }
+    } else {
+      console.error('Path traversal attempt blocked:', photo.file_path);
+    }
   }
   res.json({ ok: true });
 });
 
-// Production: serve static files
+// Multer error handler
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      res.status(400).json({ error: 'File too large (max 10MB)' });
+      return;
+    }
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  if (err?.message === 'File type not allowed') {
+    res.status(400).json({ error: 'Only JPG, PNG, GIF, and WebP images are allowed' });
+    return;
+  }
+  next(err);
+});
+
+// #18: HTTPS redirect in production
 if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] !== 'https') {
+      res.redirect(301, `https://${req.headers.host}${req.url}`);
+      return;
+    }
+    next();
+  });
+
   const distPath = join(__dirname, '..', 'dist');
   app.use(express.static(distPath));
   app.get('*', (_req, res) => {

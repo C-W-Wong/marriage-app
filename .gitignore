@@ -8,3 +8,4 @@ coverage/
 !.env.example
 *.db
 server/uploads/
+server/wedding-photos/

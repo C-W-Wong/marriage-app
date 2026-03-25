@@ -398,7 +398,7 @@ export default function App() {
             setHasRsvped(true);
           })
           .catch(() => {});
-        document.cookie = `guest_slug=${data.slug};path=/;max-age=${60 * 60 * 24 * 90}`;
+        document.cookie = `guest_slug=${data.slug};path=/;max-age=${60 * 60 * 24 * 90};SameSite=Lax;Secure`;
       })
       .catch(() => setGuestStatus('invalid'));
   }, []);

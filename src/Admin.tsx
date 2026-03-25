@@ -112,7 +112,7 @@ function GuestsTab({ password }: { password: string }) {
   const [copied, setCopied] = useState<string | null>(null);
 
   const load = () => {
-    fetch('/api/guests').then(r => r.json()).then(setGuests);
+    fetch('/api/guests', { headers: API_HEADERS(password) }).then(r => r.json()).then(setGuests);
   };
   useEffect(load, []);
 
@@ -122,7 +122,7 @@ function GuestsTab({ password }: { password: string }) {
     try {
       const res = await fetch('/api/guests', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: API_HEADERS(password),
         body: JSON.stringify({ name: name.trim() }),
       });
       if (!res.ok) throw new Error('Failed');
