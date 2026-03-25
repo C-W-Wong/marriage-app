@@ -3,13 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback, ErrorInfo, Component } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense, ErrorInfo, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun } from 'lucide-react';
-import VenueCalendarCard from './VenueCalendarCard';
 import { downloadICS, weddingDate } from './weddingConfig';
-import WeddingDayStatus from './WeddingDayStatus';
-import WeatherForecast from './WeatherForecast';
+
+// Lazy load non-critical components — invitation card renders first
+const VenueCalendarCard = React.lazy(() => import('./VenueCalendarCard'));
+const WeddingDayStatus = React.lazy(() => import('./WeddingDayStatus'));
+const WeatherForecast = React.lazy(() => import('./WeatherForecast'));
 
 interface GuestBookReply {
   id: number;
@@ -451,9 +453,13 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
-    const preload = new Audio('/keyboard-typing.wav');
-    preload.preload = 'auto';
-    preload.load();
+    // Defer audio preload until after initial render
+    const id = setTimeout(() => {
+      const preload = new Audio('/keyboard-typing.wav');
+      preload.preload = 'auto';
+      preload.load();
+    }, 500);
+    return () => clearTimeout(id);
   }, []);
   const [trackIndex, setTrackIndex] = useState(0);
 
@@ -522,7 +528,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (step === 'invitation') loadGuestBook();
+    if (step !== 'invitation') return;
+    // Defer guest book load so invitation card renders first
+    const id = requestAnimationFrame(() => {
+      setTimeout(loadGuestBook, 100);
+    });
+    return () => cancelAnimationFrame(id);
   }, [step]);
 
   // Photo Album
@@ -962,7 +973,9 @@ export default function App() {
                 </>)}
 
                 <div className="flex flex-col items-center space-y-3">
-                  <WeddingDayStatus onOpenPhotoAlbum={() => setVisibleSections(prev => ({ ...prev, photoalbum: true }))} />
+                  <Suspense fallback={null}>
+                    <WeddingDayStatus onOpenPhotoAlbum={() => setVisibleSections(prev => ({ ...prev, photoalbum: true }))} />
+                  </Suspense>
                 </div>
 
                 <motion.div
@@ -1804,7 +1817,9 @@ export default function App() {
                 <X className="w-5 h-5 text-gray-400" />
               </button>
 
-              <VenueCalendarCard />
+              <Suspense fallback={null}>
+                <VenueCalendarCard />
+              </Suspense>
             </motion.div>
           </div>
         )}
@@ -1835,7 +1850,9 @@ export default function App() {
                 <X className="w-5 h-5 text-gray-400" />
               </button>
 
-              <WeatherForecast />
+              <Suspense fallback={null}>
+                <WeatherForecast />
+              </Suspense>
             </motion.div>
           </div>
         )}
