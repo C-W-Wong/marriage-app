@@ -7,6 +7,7 @@ import React, { useState, useEffect, useRef, useCallback, ErrorInfo, Component }
 import { motion, AnimatePresence } from 'motion/react';
 import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun } from 'lucide-react';
 import VenueCalendarCard from './VenueCalendarCard';
+import { downloadICS, weddingDate } from './weddingConfig';
 import WeddingDayStatus from './WeddingDayStatus';
 import WeatherForecast from './WeatherForecast';
 
@@ -167,15 +168,18 @@ const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: Gue
     setSubmitting(false);
   };
 
+  const isVideo = entry.photo_url && /\.(mp4|mov|webm)$/i.test(entry.photo_url);
+
   return (
-    <motion.div
-      initial={{ opacity: 0, x: 20 }}
-      animate={{ opacity: 1, x: 0 }}
-      className="bg-[#fdfaf6] p-5 rounded-2xl border border-[#c5a059]/10 relative"
-    >
-      <div className="absolute -left-2 top-6 w-4 h-4 bg-[#fdfaf6] border-l border-t border-[#c5a059]/10 rotate-[-45deg]" />
+    <div className="bg-[#fdfaf6] p-5 rounded-2xl border border-[#c5a059]/10 relative">
       {entry.photo_url && (
-        <img src={entry.photo_url} alt="" className="w-full rounded-xl mb-3 max-h-80 object-contain" />
+        <div className="w-full rounded-2xl mb-3 overflow-hidden border border-[#c5a059]/10 shadow-sm bg-gray-50">
+          {isVideo ? (
+            <video src={entry.photo_url} controls playsInline className="w-full max-h-80" />
+          ) : (
+            <img src={entry.photo_url} alt="" className="w-full max-h-80 object-contain" />
+          )}
+        </div>
       )}
       <p className="text-gray-700 font-serif italic mb-3 leading-relaxed text-sm">"{entry.message}"</p>
       <div className="flex items-center justify-between mb-2">
@@ -236,7 +240,67 @@ const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: Gue
           </form>
         </div>
       )}
-    </motion.div>
+    </div>
+  );
+};
+
+// #18: TikTok-style swipeable wishes
+const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
+  entries: GuestBookEntry[];
+  userName: string;
+  onUpdate: (e: GuestBookEntry) => void;
+  onViewAll: () => void;
+}) => {
+  const [idx, setIdx] = useState(0);
+  const [dir, setDir] = useState(0);
+  const display = entries.slice(0, 20);
+  if (display.length === 0) return null;
+  const safeIdx = Math.min(idx, display.length - 1);
+
+  const goNext = () => { if (safeIdx < display.length - 1) { setDir(1); setIdx(safeIdx + 1); } };
+  const goPrev = () => { if (safeIdx > 0) { setDir(-1); setIdx(safeIdx - 1); } };
+
+  return (
+    <div className="relative overflow-hidden">
+      <AnimatePresence mode="wait" custom={dir}>
+        <motion.div
+          key={display[safeIdx].id}
+          custom={dir}
+          initial={{ y: dir > 0 ? 200 : -200, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: dir > 0 ? -200 : 200, opacity: 0 }}
+          transition={{ duration: 0.25, ease: 'easeInOut' }}
+          drag="y"
+          dragConstraints={{ top: 0, bottom: 0 }}
+          dragElastic={0.15}
+          onDragEnd={(_, info) => {
+            if (info.offset.y < -60) goNext();
+            else if (info.offset.y > 60) goPrev();
+          }}
+          className="cursor-grab active:cursor-grabbing"
+        >
+          <GuestBookCard entry={display[safeIdx]} userName={userName} onUpdate={onUpdate} />
+        </motion.div>
+      </AnimatePresence>
+      <div className="flex justify-center items-center gap-1.5 mt-4">
+        {display.slice(0, 10).map((_, i) => (
+          <button
+            key={i}
+            onClick={() => { setDir(i > safeIdx ? 1 : -1); setIdx(i); }}
+            className={`rounded-full transition-all ${i === safeIdx ? 'w-5 h-1.5 bg-[#8b0000]' : 'w-1.5 h-1.5 bg-gray-300'}`}
+          />
+        ))}
+        {display.length > 10 && <span className="text-[10px] text-gray-300 ml-1">+{display.length - 10}</span>}
+      </div>
+      <p className="text-center text-[10px] text-gray-300 mt-2 font-serif">Swipe up or down to read more</p>
+      {entries.length > 1 && (
+        <div className="text-center mt-3">
+          <button onClick={onViewAll} className="text-xs font-serif uppercase tracking-widest text-[#8b0000] hover:underline transition-colors">
+            View all {entries.length} wishes
+          </button>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -248,7 +312,8 @@ const PLAYLIST = [
 
 const CAN_HOVER = window.matchMedia('(hover: hover)').matches;
 
-const PETAL_CONFIGS = Array.from({ length: 15 }, (_, i) => ({
+const IS_MOBILE = !window.matchMedia('(hover: hover)').matches;
+const PETAL_CONFIGS = Array.from({ length: IS_MOBILE ? 6 : 15 }, (_, i) => ({
   startLeft: `${Math.random() * 100}%`,
   endLeft: `${Math.random() * 100 + (Math.random() * 20 - 10)}%`,
   duration: 12 + Math.random() * 8,
@@ -268,8 +333,15 @@ const WAVE_HEIGHTS = {
 };
 
 export default function App() {
-  const isWeddingDay = new Date() >= new Date('2026-05-20');
-  const [step, setStep] = useState<'intro' | 'doors' | 'invitation'>(isWeddingDay ? 'invitation' : 'intro');
+  const isWeddingDay = new Date() >= weddingDate;
+  const shouldSkipIntro = (() => {
+    if (isWeddingDay) return true;
+    try {
+      const expiry = localStorage.getItem('intro_expiry');
+      return expiry ? Date.now() < Number(expiry) : false;
+    } catch { return false; }
+  })();
+  const [step, setStep] = useState<'intro' | 'doors' | 'invitation'>(shouldSkipIntro ? 'invitation' : 'intro');
   const [hasStarted, setHasStarted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
@@ -371,12 +443,18 @@ export default function App() {
     validateRsvp(field, value);
   };
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // #10: Preload typing sound immediately
+  useEffect(() => {
+    const preload = new Audio('/keyboard-typing.wav');
+    preload.preload = 'auto';
+    preload.load();
+  }, []);
   const [trackIndex, setTrackIndex] = useState(0);
 
   useEffect(() => {
     const match = window.location.pathname.match(/^\/invite\/(.+)$/);
-    const savedSlug = document.cookie.match(/guest_slug=([^;]+)/)?.[1];
-    const slug = match?.[1] || savedSlug;
+    const slug = match?.[1];
 
     if (!slug) {
       setGuestStatus('invalid');
@@ -398,7 +476,6 @@ export default function App() {
             setHasRsvped(true);
           })
           .catch(() => {});
-        document.cookie = `guest_slug=${data.slug};path=/;max-age=${60 * 60 * 24 * 90};SameSite=Lax;Secure`;
       })
       .catch(() => setGuestStatus('invalid'));
   }, []);
@@ -580,6 +657,10 @@ export default function App() {
       }, 3500);
       return () => clearTimeout(timer);
     }
+    // #16: Cache intro completion for 12 hours
+    if (step === 'invitation') {
+      try { localStorage.setItem('intro_expiry', String(Date.now() + 12 * 60 * 60 * 1000)); } catch {}
+    }
   }, [step]);
 
   if (guestStatus === 'loading') {
@@ -656,6 +737,11 @@ export default function App() {
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={() => {
+                  // #3: Unlock audio for Safari — must happen in user gesture
+                  const audio = audioRef.current;
+                  if (audio) {
+                    audio.play().then(() => audio.pause()).catch(() => {});
+                  }
                   setHasStarted(true);
                 }}
                 className="px-10 py-4 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-[0.3em] text-sm shadow-xl hover:bg-[#a00000] transition-all"
@@ -862,6 +948,12 @@ export default function App() {
                     <MapPin size={12} />
                     <span>Old Orange County Courthouse</span>
                   </motion.button>
+                  <button
+                    onClick={downloadICS}
+                    className="flex items-center gap-1.5 text-[#c5a059] hover:text-[#8b0000] font-serif text-xs uppercase tracking-widest transition-colors"
+                  >
+                    <span>Add to Calendar</span>
+                  </button>
                 </div>
                 </>)}
 
@@ -945,6 +1037,7 @@ export default function App() {
           </motion.div>
 
           {/* Inline Wishes Section */}
+          {/* #18: TikTok-style swipeable wishes */}
           {guestBookEntries.length > 0 && (
             <motion.div
               initial={{ opacity: 0, y: 30 }}
@@ -956,26 +1049,12 @@ export default function App() {
               <div className="text-center mb-6">
                 <p className="text-xs font-serif uppercase tracking-[0.3em] text-[#c5a059]">Wishes from loved ones</p>
               </div>
-              <div className="space-y-4">
-                {guestBookEntries.slice(0, 5).map(entry => (
-                  <GuestBookCard
-                    key={entry.id}
-                    entry={entry}
-                    userName={guestInfo?.name || guestBookData.name}
-                    onUpdate={(updated) => setGuestBookEntries(prev => prev.map(e => e.id === updated.id ? updated : e))}
-                  />
-                ))}
-              </div>
-              {guestBookEntries.length > 5 && (
-                <div className="text-center mt-6">
-                  <button
-                    onClick={() => setVisibleSections(prev => ({ ...prev, guestbook: true }))}
-                    className="text-xs font-serif uppercase tracking-widest text-[#8b0000] hover:underline transition-colors"
-                  >
-                    View all {guestBookEntries.length} wishes
-                  </button>
-                </div>
-              )}
+              <SwipeableWishes
+                entries={guestBookEntries}
+                userName={guestInfo?.name || guestBookData.name}
+                onUpdate={(updated) => setGuestBookEntries(prev => prev.map(e => e.id === updated.id ? updated : e))}
+                onViewAll={() => setVisibleSections(prev => ({ ...prev, guestbook: true }))}
+              />
             </motion.div>
           )}
 
@@ -1100,10 +1179,10 @@ export default function App() {
                 <motion.section
                   id="rsvp-section"
                   key="rsvp-section"
-                  initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                  transition={{ duration: 0.4, ease: "easeOut" }}
+                  initial={{ opacity: 0, y: 30 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 30 }}
+                  transition={{ duration: 0.3, ease: "easeOut" }}
                   className="w-full max-w-4xl max-h-[90vh] bg-white rounded-[2rem] md:rounded-[3rem] shadow-2xl relative z-10 overflow-y-auto hearty-scrollbar p-6 sm:p-10 md:p-16"
                 >
                   <button
@@ -1444,11 +1523,18 @@ export default function App() {
                             </label>
                             {guestBookPhoto ? (
                               <div className="flex items-center gap-3 py-2">
-                                <img
-                                  src={URL.createObjectURL(guestBookPhoto)}
-                                  alt="Preview"
-                                  className="w-16 h-16 rounded-lg object-cover border border-[#c5a059]/20"
-                                />
+                                {guestBookPhoto.type.startsWith('video/') ? (
+                                  <video
+                                    src={URL.createObjectURL(guestBookPhoto)}
+                                    className="w-16 h-16 rounded-lg object-cover border border-[#c5a059]/20"
+                                  />
+                                ) : (
+                                  <img
+                                    src={URL.createObjectURL(guestBookPhoto)}
+                                    alt="Preview"
+                                    className="w-16 h-16 rounded-lg object-cover border border-[#c5a059]/20"
+                                  />
+                                )}
                                 <div className="flex-1 min-w-0">
                                   <p className="text-xs font-serif text-gray-600 truncate">{guestBookPhoto.name}</p>
                                   <p className="text-[10px] text-gray-400">{(guestBookPhoto.size / 1024 / 1024).toFixed(1)} MB</p>
@@ -1462,18 +1548,41 @@ export default function App() {
                                 </button>
                               </div>
                             ) : (
-                              <label className="flex items-center justify-center py-4 border border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-[#c5a059]/40 transition-colors">
-                                <input
-                                  type="file"
-                                  accept="image/*"
-                                  className="hidden"
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0];
-                                    if (file) setGuestBookPhoto(file);
-                                  }}
-                                />
-                                <span className="text-xs font-serif text-gray-400">Tap to add a photo</span>
-                              </label>
+                              <div className="flex gap-2">
+                                <label className="flex-1 flex items-center justify-center py-4 border border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-[#c5a059]/40 transition-colors">
+                                  <input
+                                    type="file"
+                                    accept="image/*,video/mp4,video/quicktime,video/webm"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file && file.size > 50 * 1024 * 1024) {
+                                        e.target.value = '';
+                                        return;
+                                      }
+                                      if (file) setGuestBookPhoto(file);
+                                    }}
+                                  />
+                                  <span className="text-xs font-serif text-gray-400">Photo or Video</span>
+                                </label>
+                                <label className="flex items-center justify-center px-4 py-4 border border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-[#c5a059]/40 transition-colors">
+                                  <input
+                                    type="file"
+                                    accept="video/*"
+                                    capture="environment"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file && file.size > 50 * 1024 * 1024) {
+                                        e.target.value = '';
+                                        return;
+                                      }
+                                      if (file) setGuestBookPhoto(file);
+                                    }}
+                                  />
+                                  <span className="text-xs font-serif text-gray-400">Record</span>
+                                </label>
+                              </div>
                             )}
                           </div>
                           <motion.button
@@ -1559,33 +1668,43 @@ export default function App() {
                 </p>
               </div>
 
-              {/* Upload area */}
+              {/* Upload area — #12: only available on/after wedding date */}
               <div className="mb-8 space-y-3">
-                {!canUploadPhotos && (
-                  <p className="text-xs font-serif text-gray-400 text-center">
-                    {!hasRsvped || !rsvpData.attending
-                      ? 'Only attending guests can upload photos. Please RSVP as attending first.'
-                      : 'Please leave a wish first so we know your name, or visit via your invite link.'}
-                  </p>
+                {!isWeddingDay ? (
+                  <div className="py-8 rounded-2xl border-2 border-dashed border-[#c5a059]/20 bg-[#fdfaf6] text-center">
+                    <Camera size={24} className="text-[#c5a059]/40 mx-auto mb-2" />
+                    <p className="text-sm font-serif text-gray-400">Photo sharing opens on the wedding day</p>
+                    <p className="text-[10px] font-serif text-gray-300 mt-1">Come back on May 20 to share your moments!</p>
+                  </div>
+                ) : (
+                  <>
+                    {!canUploadPhotos && (
+                      <p className="text-xs font-serif text-gray-400 text-center">
+                        {!hasRsvped || !rsvpData.attending
+                          ? 'Only attending guests can upload photos. Please RSVP as attending first.'
+                          : 'Please leave a wish first so we know your name, or visit via your invite link.'}
+                      </p>
+                    )}
+                    <label className={`flex flex-col items-center justify-center py-8 border-2 border-dashed border-[#c5a059]/30 rounded-2xl transition-colors bg-[#fdfaf6] ${canUploadPhotos && !photoAlbumUploading ? 'cursor-pointer hover:border-[#c5a059]/60' : 'opacity-50 cursor-not-allowed'}`}>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files.length > 0) {
+                            handlePhotoAlbumUpload(e.target.files);
+                            e.target.value = '';
+                          }
+                        }}
+                        disabled={photoAlbumUploading || !canUploadPhotos}
+                      />
+                      <Camera size={24} className="text-[#c5a059] mb-2" />
+                      <span className="text-sm font-serif text-gray-500">Tap to share your photos</span>
+                      <span className="text-[10px] font-serif text-gray-400 mt-1">You can select multiple photos</span>
+                    </label>
+                  </>
                 )}
-                <label className={`flex flex-col items-center justify-center py-8 border-2 border-dashed border-[#c5a059]/30 rounded-2xl transition-colors bg-[#fdfaf6] ${canUploadPhotos && !photoAlbumUploading ? 'cursor-pointer hover:border-[#c5a059]/60' : 'opacity-50 cursor-not-allowed'}`}>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={(e) => {
-                      if (e.target.files && e.target.files.length > 0) {
-                        handlePhotoAlbumUpload(e.target.files);
-                        e.target.value = '';
-                      }
-                    }}
-                    disabled={photoAlbumUploading || !canUploadPhotos}
-                  />
-                  <Camera size={24} className="text-[#c5a059] mb-2" />
-                  <span className="text-sm font-serif text-gray-500">Tap to share your photos</span>
-                  <span className="text-[10px] font-serif text-gray-400 mt-1">You can select multiple photos</span>
-                </label>
 
                 {/* Progress bar */}
                 {photoAlbumUploading && (

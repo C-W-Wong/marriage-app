@@ -19,10 +19,12 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const weddingPhotosDir = join(__dirname, 'wedding-photos');
 if (!fs.existsSync(weddingPhotosDir)) fs.mkdirSync(weddingPhotosDir, { recursive: true });
 
-// #5/#6: Whitelist image extensions and validate magic bytes
+// #5/#6: Whitelist extensions and validate magic bytes
 const ALLOWED_IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+const ALLOWED_VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
+const ALLOWED_MEDIA_EXTS = new Set([...ALLOWED_IMAGE_EXTS, ...ALLOWED_VIDEO_EXTS]);
 
-function validateImageMagicBytes(filePath: string): boolean {
+function validateMediaMagicBytes(filePath: string): boolean {
   try {
     const fd = fs.openSync(filePath, 'r');
     const buf = Buffer.alloc(12);
@@ -37,6 +39,10 @@ function validateImageMagicBytes(filePath: string): boolean {
     // WebP: RIFF....WEBP
     if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
         buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+    // MP4/MOV: ftyp at offset 4
+    if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) return true;
+    // WebM: 1A 45 DF A3
+    if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return true;
     return false;
   } catch {
     return false;
@@ -73,6 +79,34 @@ const createImageUpload = (dest: string) => multer({
 const upload = createImageUpload(uploadsDir);
 const photoUpload = createImageUpload(weddingPhotosDir);
 
+// Guest book media upload: images + videos up to 50MB
+const guestBookUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadsDir),
+    filename: (_req, file, cb) => {
+      const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+      if (!ALLOWED_MEDIA_EXTS.has(ext)) return cb(new Error('File type not allowed'), '');
+      cb(null, `${crypto.randomBytes(8).toString('hex')}.${ext}`);
+    },
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = (file.originalname.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_MEDIA_EXTS.has(ext)) return cb(null, false);
+    if (file.mimetype === 'image/svg+xml') return cb(null, false);
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(null, false);
+    }
+  },
+});
+
+// Gallery image upload for admin
+const galleryDir = join(__dirname, 'gallery-images');
+if (!fs.existsSync(galleryDir)) fs.mkdirSync(galleryDir, { recursive: true });
+const galleryUpload = createImageUpload(galleryDir);
+
 const app = express();
 
 // #10: Security headers
@@ -84,7 +118,8 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:", "blob:"],
-      frameSrc: ["'self'", "https://maps.google.com"],
+      frameSrc: ["'self'", "https://maps.google.com", "https://www.google.com", "https://maps.googleapis.com"],
+      mediaSrc: ["'self'", "blob:"],
       connectSrc: ["'self'", "https://calendar.google.com", "https://maps.apple.com"],
     },
   },
@@ -103,6 +138,12 @@ app.use(express.json({ limit: '1mb' }));
 
 // #5/#6: Serve uploads with nosniff and attachment disposition for safety
 app.use('/uploads', express.static(uploadsDir, {
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
+  },
+}));
+app.use('/gallery-images', express.static(galleryDir, {
   setHeaders: (res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'");
@@ -317,7 +358,7 @@ app.get('/api/guest-book', (_req, res) => {
   res.json(result);
 });
 
-app.post('/api/guest-book', writeLimiter, upload.single('photo'), (req, res) => {
+app.post('/api/guest-book', writeLimiter, guestBookUpload.single('photo'), (req, res) => {
   const { name, message } = req.body;
   if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
     res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
@@ -332,7 +373,7 @@ app.post('/api/guest-book', writeLimiter, upload.single('photo'), (req, res) => 
   let photoUrl: string | null = null;
   if (req.file) {
     const filePath = join(uploadsDir, req.file.filename);
-    if (!validateImageMagicBytes(filePath)) {
+    if (!validateMediaMagicBytes(filePath)) {
       fs.unlinkSync(filePath);
       res.status(400).json({ error: 'Invalid image file' });
       return;
@@ -441,8 +482,13 @@ app.get('/api/photos', (req, res) => {
   res.json({ photos, total, hasMore: offset + limit < total });
 });
 
-// #11: Photo upload requires a valid guest who RSVP'd as attending
+// #12: Photo upload only on or after wedding date
 app.post('/api/photos', uploadLimiter, photoUpload.array('photos', 10), (req, res) => {
+  const weddingDay = new Date('2026-05-20T00:00:00-07:00');
+  if (new Date() < weddingDay) {
+    res.status(403).json({ error: 'Photo sharing opens on the wedding day!' });
+    return;
+  }
   const { name } = req.body;
   if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > MAX_NAME_LEN) {
     res.status(400).json({ error: `Name must be 2-${MAX_NAME_LEN} characters` });
@@ -458,7 +504,7 @@ app.post('/api/photos', uploadLimiter, photoUpload.array('photos', 10), (req, re
   const validFiles: Express.Multer.File[] = [];
   for (const file of files) {
     const filePath = join(weddingPhotosDir, file.filename);
-    if (validateImageMagicBytes(filePath)) {
+    if (validateMediaMagicBytes(filePath)) {
       validFiles.push(file);
     } else {
       try { fs.unlinkSync(filePath); } catch (e) { console.error('Failed to remove invalid upload:', e); }
@@ -684,6 +730,28 @@ app.post('/api/admin/gallery', adminAuth, writeLimiter, (req, res) => {
     res.status(400).json({ error: 'Invalid URL format' }); return;
   }
 
+  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM gallery').get() as { m: number | null };
+  const sortOrder = (maxOrder.m ?? -1) + 1;
+  const result = db.prepare('INSERT INTO gallery (url, caption, sort_order) VALUES (?, ?, ?)').run(url, caption, sortOrder);
+  const image = db.prepare('SELECT id, url, caption, sort_order FROM gallery WHERE id = ?').get(result.lastInsertRowid);
+  res.status(201).json(image);
+});
+
+// Admin: Gallery file upload
+app.post('/api/admin/gallery/upload', adminAuth, galleryUpload.single('image'), (req, res) => {
+  const { caption } = req.body;
+  if (!caption || typeof caption !== 'string' || caption.length > MAX_MESSAGE_LEN) {
+    res.status(400).json({ error: 'Caption required (max 500 chars)' }); return;
+  }
+  if (!req.file) {
+    res.status(400).json({ error: 'Image file required' }); return;
+  }
+  const filePath = join(galleryDir, req.file.filename);
+  if (!validateMediaMagicBytes(filePath)) {
+    fs.unlinkSync(filePath);
+    res.status(400).json({ error: 'Invalid image file' }); return;
+  }
+  const url = `/gallery-images/${req.file.filename}`;
   const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM gallery').get() as { m: number | null };
   const sortOrder = (maxOrder.m ?? -1) + 1;
   const result = db.prepare('INSERT INTO gallery (url, caption, sort_order) VALUES (?, ?, ?)').run(url, caption, sortOrder);

@@ -353,7 +353,7 @@ function PhotosTab({ password }: { password: string }) {
 
 function GalleryTab({ password }: { password: string }) {
   const [images, setImages] = useState<any[]>([]);
-  const [url, setUrl] = useState('');
+  const [file, setFile] = useState<File | null>(null);
   const [caption, setCaption] = useState('');
 
   const load = () => {
@@ -363,13 +363,16 @@ function GalleryTab({ password }: { password: string }) {
 
   const addImage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!url.trim() || !caption.trim()) return;
-    await fetch('/api/admin/gallery', {
+    if (!file || !caption.trim()) return;
+    const formData = new FormData();
+    formData.append('image', file);
+    formData.append('caption', caption.trim());
+    await fetch('/api/admin/gallery/upload', {
       method: 'POST',
-      headers: API_HEADERS(password),
-      body: JSON.stringify({ url: url.trim(), caption: caption.trim() }),
+      headers: { 'Authorization': `Bearer ${password}` },
+      body: formData,
     });
-    setUrl('');
+    setFile(null);
     setCaption('');
     load();
   };
@@ -401,13 +404,16 @@ function GalleryTab({ password }: { password: string }) {
 
   return (
     <div className="space-y-6">
-      <form onSubmit={addImage} className="flex gap-3">
-        <input
-          value={url}
-          onChange={e => setUrl(e.target.value)}
-          placeholder="Image URL"
-          className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#8b0000] transition-colors"
-        />
+      <form onSubmit={addImage} className="flex flex-col sm:flex-row gap-3">
+        <label className="flex-1 flex items-center px-4 py-2.5 border border-gray-200 rounded-lg text-sm cursor-pointer hover:border-[#8b0000] transition-colors">
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={e => setFile(e.target.files?.[0] || null)}
+          />
+          <span className="text-gray-500 truncate">{file ? file.name : 'Choose image...'}</span>
+        </label>
         <input
           value={caption}
           onChange={e => setCaption(e.target.value)}
@@ -415,7 +421,7 @@ function GalleryTab({ password }: { password: string }) {
           className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#8b0000] transition-colors"
         />
         <button className="px-5 py-2.5 bg-[#8b0000] text-white rounded-lg text-sm font-medium hover:bg-[#a00000] transition-colors whitespace-nowrap">
-          Add
+          Upload
         </button>
       </form>
 

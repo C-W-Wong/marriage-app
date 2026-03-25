@@ -1,66 +1,29 @@
-import { MapPin, Calendar, Download, Navigation } from 'lucide-react';
-import { WEDDING_CONFIG } from './weddingConfig';
+import { MapPin, Calendar, Download } from 'lucide-react';
+import { WEDDING_CONFIG, downloadICS, googleCalendarUrl } from './weddingConfig';
 
-const { event, venue } = WEDDING_CONFIG;
+const { venue } = WEDDING_CONFIG;
 
-// Shared date/time formatting (used by both ICS and Google Calendar)
-const dateStr = event.date.replace(/-/g, '');
-const calStart = `${dateStr}T${event.startTime.replace(':', '')}00`;
-const calEnd = `${dateStr}T${event.endTime.replace(':', '')}00`;
-
-// Pre-compute static address display
 const addressParts = venue.address.split(', ');
 const addressLine1 = addressParts[0];
 const addressLine2 = addressParts.slice(1).join(', ');
 
-const mapEmbedUrl = `https://maps.google.com/maps?q=${venue.lat},${venue.lng}&z=16&output=embed`;
+// #1: Use www.google.com for better mobile embed support
+const mapEmbedUrl = `https://www.google.com/maps?q=${venue.lat},${venue.lng}&z=16&output=embed`;
 
-const icsContent = [
-  'BEGIN:VCALENDAR',
-  'VERSION:2.0',
-  'PRODID:-//Wedding Invitation//EN',
-  'CALSCALE:GREGORIAN',
-  'METHOD:PUBLISH',
-  'BEGIN:VEVENT',
-  `UID:wedding-${dateStr}@wedding-invite`,
-  `DTSTART;TZID=${event.timezone}:${calStart}`,
-  `DTEND;TZID=${event.timezone}:${calEnd}`,
-  `SUMMARY:${event.title}`,
-  `LOCATION:${venue.name}\\, ${venue.address.replace(/,/g, '\\,')}`,
-  `DESCRIPTION:${event.description}`,
-  'STATUS:CONFIRMED',
-  'END:VEVENT',
-  'END:VCALENDAR',
-].join('\r\n');
+// #7: Handle navigation with proper iOS support
+function handleNavigate() {
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+    (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
 
-const googleCalendarUrl = (() => {
-  const params = new URLSearchParams({
-    action: 'TEMPLATE',
-    text: event.title,
-    dates: `${calStart}/${calEnd}`,
-    location: `${venue.name}, ${venue.address}`,
-    details: event.description,
-    ctz: event.timezone,
-  });
-  return `https://calendar.google.com/calendar/render?${params.toString()}`;
-})();
-
-// Detect iOS including iPadOS (which reports as Macintosh in UA)
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-  (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-
-const navigationUrl = isIOS
-  ? `https://maps.apple.com/?daddr=${encodeURIComponent(venue.address)}&ll=${venue.lat},${venue.lng}`
-  : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(venue.address)}`;
-
-function downloadICS() {
-  const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'wedding-invitation.ics';
-  a.click();
-  URL.revokeObjectURL(url);
+  if (isIOS) {
+    window.location.href = `maps://maps.apple.com/?daddr=${encodeURIComponent(venue.address)}`;
+  } else {
+    window.open(
+      `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(venue.address)}`,
+      '_blank'
+    );
+  }
 }
 
 export default function VenueCalendarCard() {
@@ -69,22 +32,16 @@ export default function VenueCalendarCard() {
       <div className="w-14 h-14 rounded-full bg-[#8b0000]/5 flex items-center justify-center mb-5">
         <MapPin size={24} className="text-[#8b0000]" />
       </div>
-      <h3 className="text-3xl md:text-4xl font-serif font-light text-[#1a1a1a] mb-2">
-        The Venue
-      </h3>
-      <div className="h-px w-16 bg-[#c5a059] mx-auto my-4" />
-
-      <p className="text-xl md:text-2xl font-serif font-light text-[#1a1a1a] leading-tight mt-2">
+      {/* #14/#17: Bold courthouse name as title */}
+      <h3 className="text-lg md:text-xl font-serif font-bold text-[#1a1a1a] mb-2 uppercase tracking-wider">
         {venue.name}
-      </p>
-      <p className="text-sm md:text-base font-serif text-gray-500 mt-3">
-        {addressLine1}<br />
-        {addressLine2}
-      </p>
-      <p className="text-sm font-serif text-gray-400 mt-3 max-w-xs leading-relaxed">
-        {venue.description}
+      </h3>
+      <div className="h-px w-16 bg-[#c5a059] mx-auto my-3" />
+      <p className="text-sm md:text-base font-serif text-gray-500">
+        {addressLine1}<br />{addressLine2}
       </p>
 
+      {/* #1: Embedded Google Map */}
       <div className="w-full mt-6 rounded-xl overflow-hidden border border-[#c5a059]/20">
         <iframe
           src={mapEmbedUrl}
@@ -98,16 +55,16 @@ export default function VenueCalendarCard() {
         />
       </div>
 
-      <a
-        href={navigationUrl}
-        target="_blank"
-        rel="noopener noreferrer"
+      {/* #7: Navigate button — uses window.location for iOS Maps app */}
+      <button
+        onClick={handleNavigate}
         className="mt-5 inline-flex items-center justify-center gap-2 px-6 py-3 bg-[#8b0000] text-white rounded-full font-serif text-sm uppercase tracking-widest hover:bg-[#a00000] transition-colors"
       >
-        <Navigation size={14} />
+        <MapPin size={14} />
         <span>Navigate to Venue</span>
-      </a>
+      </button>
 
+      {/* Calendar Section */}
       <div className="w-full mt-8 pt-7 border-t border-[#c5a059]/20">
         <div className="flex items-center justify-center gap-2 mb-5">
           <Calendar size={14} className="text-[#c5a059]" />
