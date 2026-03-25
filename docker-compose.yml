@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    container_name: marriage-invite-app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - ALLOWED_ORIGIN=https://chris-eileen.com
+    volumes:
+      - db-data:/app/server/data
+      - uploads:/app/server/uploads
+      - wedding-photos:/app/server/wedding-photos
+    networks:
+      - traefik_network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wedding.rule=Host(`chris-eileen.com`) || Host(`www.chris-eileen.com`)"
+      - "traefik.http.routers.wedding.entrypoints=websecure"
+      - "traefik.http.routers.wedding.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.wedding.loadbalancer.server.port=3001"
+      - "traefik.http.middlewares.wedding-www.redirectregex.regex=^https://www\\.chris-eileen\\.com/(.*)"
+      - "traefik.http.middlewares.wedding-www.redirectregex.replacement=https://chris-eileen.com/$${1}"
+      - "traefik.http.middlewares.wedding-www.redirectregex.permanent=true"
+      - "traefik.http.routers.wedding.middlewares=wedding-www"
+
+volumes:
+  db-data:
+  uploads:
+  wedding-photos:
+
+networks:
+  traefik_network:
+    external: true

@@ -7,5 +7,8 @@ coverage/
 .env*
 !.env.example
 *.db
+*.db-shm
+*.db-wal
 server/uploads/
 server/wedding-photos/
+server/data/
