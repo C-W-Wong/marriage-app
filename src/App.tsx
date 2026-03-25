@@ -1222,50 +1222,26 @@ export default function App() {
                   {rsvpStatus === 'success' ? (
                     <motion.div
                       key="rsvp-success"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0 }}
-                      transition={{ duration: 0.4 }}
+                      transition={{ duration: 0.3 }}
                       className="text-center py-12 space-y-6"
                     >
-                      <motion.div
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        transition={{ delay: 0.2, type: 'spring', stiffness: 200, damping: 15 }}
-                        className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto"
-                      >
+                      <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto">
                         <CheckCircle2 className="text-green-500 w-12 h-12" />
-                      </motion.div>
-                      <motion.h3
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.4 }}
-                        className="text-2xl md:text-3xl font-serif text-[#1a1a1a]"
-                      >
-                        Thank You!
-                      </motion.h3>
-                      <motion.p
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ delay: 0.6 }}
-                        className="text-gray-500 font-serif"
-                      >
+                      </div>
+                      <h3 className="text-2xl md:text-3xl font-serif text-[#1a1a1a]">Thank You!</h3>
+                      <p className="text-gray-500 font-serif">
                         {rsvpData.attending
                           ? "Your response has been received. We can't wait to celebrate with you!"
                           : "We're sorry you can't make it, but we appreciate you letting us know."}
-                      </motion.p>
-                      <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ delay: 0.8 }}
-                        className="pt-4 border-t border-gray-100 space-y-4"
-                      >
+                      </p>
+                      <div className="pt-4 border-t border-gray-100 space-y-4">
                         <p className="text-sm font-serif text-gray-400 italic">
                           Would you like to leave a wish for the couple?
                         </p>
-                        <motion.button
-                          whileHover={{ scale: 1.05 }}
-                          whileTap={{ scale: 0.95 }}
+                        <button
                           onClick={() => {
                             setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
                             setRsvpStatus('idle');
@@ -1274,14 +1250,9 @@ export default function App() {
                         >
                           <MessageSquare size={14} />
                           <span>Leave a Wish</span>
-                        </motion.button>
-                      </motion.div>
-                      <motion.button
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ delay: 1 }}
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
+                        </button>
+                      </div>
+                      <button
                         onClick={() => {
                           setVisibleSections(prev => ({ ...prev, rsvp: false }));
                           setRsvpStatus('idle');
@@ -1289,7 +1260,7 @@ export default function App() {
                         className="text-gray-400 font-serif text-xs uppercase tracking-widest hover:text-gray-600 transition-colors"
                       >
                         Close
-                      </motion.button>
+                      </button>
                     </motion.div>
                   ) : (
                     <motion.form
