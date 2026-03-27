@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, Suspense, ErrorInfo, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun } from 'lucide-react';
+import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun, CalendarPlus } from 'lucide-react';
 import { downloadICS, weddingDate } from './weddingConfig';
 
 // Lazy load non-critical components — invitation card renders first
@@ -258,8 +258,8 @@ const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
   if (display.length === 0) return null;
   const safeIdx = Math.min(idx, display.length - 1);
 
-  const goNext = () => { if (safeIdx < display.length - 1) { setDir(1); setIdx(safeIdx + 1); } };
-  const goPrev = () => { if (safeIdx > 0) { setDir(-1); setIdx(safeIdx - 1); } };
+  const goNext = () => { setDir(1); setIdx(safeIdx < display.length - 1 ? safeIdx + 1 : 0); };
+  const goPrev = () => { setDir(-1); setIdx(safeIdx > 0 ? safeIdx - 1 : display.length - 1); };
 
   return (
     <div className="relative overflow-hidden">
@@ -306,9 +306,9 @@ const SwipeableWishes = ({ entries, userName, onUpdate, onViewAll }: {
 };
 
 const PLAYLIST = [
+  { src: '/that-sunny-day.mp3', title: 'That Sunny Day' },
   { src: '/take-turns.mp3', title: 'Take Turns' },
   { src: '/every-road.mp3', title: 'Every Road' },
-  { src: '/that-sunny-day.mp3', title: 'That Sunny Day' },
 ];
 
 const CAN_HOVER = window.matchMedia('(hover: hover)').matches;
@@ -919,17 +919,6 @@ export default function App() {
                   >
                     Chris & Eileen
                   </motion.h2>
-                  {!isWeddingDay && (
-                  <motion.h3
-                    initial={{ opacity: 0, y: 10 }}
-                    whileInView={{ opacity: 1, y: 0 }}
-                    viewport={{ once: true }}
-                    transition={{ duration: 0.8, delay: 0.4 }}
-                    className="text-lg md:text-2xl font-serif text-[#8b0000] uppercase tracking-[0.2em] md:tracking-[0.3em] font-light"
-                  >
-                    Are Getting Married
-                  </motion.h3>
-                  )}
                 </motion.div>
 
                 {!isWeddingDay && (<>
@@ -942,9 +931,15 @@ export default function App() {
                 />
 
                 <div className="flex flex-col items-center space-y-3">
+                  <button
+                    onClick={downloadICS}
+                    className="flex items-center gap-1.5 text-[#c5a059] hover:text-[#8b0000] font-serif text-xs uppercase tracking-widest transition-colors"
+                  >
+                    <CalendarPlus size={12} />
+                    <span>Add to Calendar</span>
+                  </button>
                   <p className="text-3xl md:text-5xl font-serif font-light">May 20, 2026</p>
                   <div className="flex items-center gap-2">
-                    <p className="text-xl md:text-2xl font-serif text-[#8b0000]">Wednesday at 08:20 AM</p>
                     <motion.button
                       whileHover={{ scale: 1.1 }}
                       whileTap={{ scale: 0.9 }}
@@ -954,6 +949,7 @@ export default function App() {
                     >
                       <CloudSun size={16} className="text-[#c5a059]" />
                     </motion.button>
+                    <p className="text-xl md:text-2xl font-serif text-[#8b0000]">Wednesday at 08:20 AM</p>
                   </div>
                   <motion.button
                     whileTap={{ scale: 0.95 }}
@@ -963,12 +959,6 @@ export default function App() {
                     <MapPin size={12} />
                     <span>Old Orange County Courthouse</span>
                   </motion.button>
-                  <button
-                    onClick={downloadICS}
-                    className="flex items-center gap-1.5 text-[#c5a059] hover:text-[#8b0000] font-serif text-xs uppercase tracking-widest transition-colors"
-                  >
-                    <span>Add to Calendar</span>
-                  </button>
                 </div>
                 </>)}
 
@@ -1257,6 +1247,15 @@ export default function App() {
                           : "We're sorry you can't make it, but we appreciate you letting us know."}
                       </p>
                       <div className="pt-4 border-t border-gray-100 space-y-4">
+                        {rsvpData.attending && (
+                          <button
+                            onClick={downloadICS}
+                            className="px-6 py-3 bg-[#c5a059] text-white rounded-full font-serif uppercase tracking-widest text-xs shadow-lg hover:bg-[#b8933e] transition-colors inline-flex items-center gap-2"
+                          >
+                            <CalendarPlus size={14} />
+                            <span>Add to Calendar</span>
+                          </button>
+                        )}
                         <p className="text-sm font-serif text-gray-400 italic">
                           Would you like to leave a wish for the couple?
                         </p>
