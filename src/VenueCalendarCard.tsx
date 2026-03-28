@@ -31,7 +31,7 @@ export default function VenueCalendarCard() {
         <MapPin size={24} className="text-[#8b0000]" />
       </div>
       {/* #14/#17: Bold courthouse name as title */}
-      <h3 className="text-lg md:text-xl font-serif font-bold text-[#1a1a1a] mb-2 uppercase tracking-wider">
+      <h3 className="text-lg md:text-xl font-serif font-bold text-[#8b6914] mb-2 uppercase tracking-wider">
         {venue.name}
       </h3>
       <div className="h-px w-16 bg-[#c5a059] mx-auto my-3" />

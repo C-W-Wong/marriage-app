@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, Suspense, ErrorInfo, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun, CalendarPlus } from 'lucide-react';
+import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun, CalendarPlus, Images } from 'lucide-react';
 import { downloadICS, weddingDate } from './weddingConfig';
 
 // Lazy load non-critical components — invitation card renders first
@@ -1250,7 +1250,7 @@ export default function App() {
                           </button>
                         )}
                         <p className="text-sm font-serif text-gray-400 italic">
-                          Would you like to leave a wish for the couple?
+                          Would you like to leave a wish for us?
                         </p>
                         <button
                           onClick={() => {
@@ -1262,6 +1262,33 @@ export default function App() {
                           <MessageSquare size={14} />
                           <span>Leave a Wish</span>
                         </button>
+                      </div>
+                      <div className="pt-4 border-t border-gray-100 space-y-3">
+                        <p className="text-sm font-serif text-gray-400 italic">
+                          Check out our photo gallery and share your moments!
+                        </p>
+                        <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                          <button
+                            onClick={() => {
+                              setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
+                              setRsvpStatus('idle');
+                            }}
+                            className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-xs hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
+                          >
+                            <Images size={14} />
+                            <span>Photo Gallery</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              setVisibleSections(prev => ({ ...prev, rsvp: false, photoalbum: true }));
+                              setRsvpStatus('idle');
+                            }}
+                            className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-xs hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
+                          >
+                            <Camera size={14} />
+                            <span>Photo Album</span>
+                          </button>
+                        </div>
                       </div>
                       <button
                         onClick={() => {

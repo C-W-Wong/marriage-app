@@ -20,7 +20,7 @@ const weddingPhotosDir = join(__dirname, 'wedding-photos');
 if (!fs.existsSync(weddingPhotosDir)) fs.mkdirSync(weddingPhotosDir, { recursive: true });
 
 // #5/#6: Whitelist extensions and validate magic bytes
-const ALLOWED_IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+const ALLOWED_IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif']);
 const ALLOWED_VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
 const ALLOWED_MEDIA_EXTS = new Set([...ALLOWED_IMAGE_EXTS, ...ALLOWED_VIDEO_EXTS]);
 
@@ -43,6 +43,11 @@ function validateMediaMagicBytes(filePath: string): boolean {
     if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) return true;
     // WebM: 1A 45 DF A3
     if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return true;
+    // HEIF/HEIC: ftyp at offset 4 with heic/heix/mif1/msf1 brand
+    if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+      const brand = buf.slice(8, 12).toString('ascii');
+      if (['heic', 'heix', 'mif1', 'msf1'].includes(brand)) return true;
+    }
     return false;
   } catch {
     return false;
@@ -70,8 +75,11 @@ const createImageUpload = (dest: string) => multer({
     }
     if (file.mimetype.startsWith('image/') && file.mimetype !== 'image/svg+xml') {
       cb(null, true);
+    } else if (file.mimetype === 'application/octet-stream' && ALLOWED_IMAGE_EXTS.has(ext)) {
+      // Some devices send HEIC/HEIF with generic mimetype
+      cb(null, true);
     } else {
-      cb(null, false); // silently skip instead of erroring
+      cb(new Error(`File type not allowed: ${file.mimetype}`) as any, false);
     }
   },
 });
@@ -812,8 +820,8 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
     res.status(400).json({ error: err.message });
     return;
   }
-  if (err?.message === 'File type not allowed') {
-    res.status(400).json({ error: 'Only JPG, PNG, GIF, and WebP images are allowed' });
+  if (err?.message?.startsWith('File type not allowed')) {
+    res.status(400).json({ error: 'Only JPG, PNG, GIF, WebP, and HEIC images are allowed' });
     return;
   }
   next(err);
