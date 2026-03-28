@@ -1335,6 +1335,37 @@ export default function App() {
                         </>
                       )}
 
+                      {!rsvpData.attending && (
+                        <>
+                          <div className="h-px w-16 bg-[#c5a059]/40 mx-auto mb-5" />
+                          <p className="text-sm font-serif text-gray-400 italic mb-4">
+                            Even though you can't make it, we'd love to hear from you!
+                          </p>
+                          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                            <button
+                              onClick={() => {
+                                setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
+                                setRsvpStatus('idle');
+                              }}
+                              className="px-5 py-2.5 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-widest text-[10px] shadow hover:bg-[#a00000] transition-colors inline-flex items-center gap-2"
+                            >
+                              <MessageSquare size={13} />
+                              <span>Leave a Wish</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
+                                setRsvpStatus('idle');
+                              }}
+                              className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
+                            >
+                              <Images size={13} />
+                              <span>Photo Gallery</span>
+                            </button>
+                          </div>
+                        </>
+                      )}
+
                       <button
                         onClick={() => {
                           setVisibleSections(prev => ({ ...prev, rsvp: false }));
