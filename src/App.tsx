@@ -313,7 +313,7 @@ const PLAYLIST = [
 
 const CAN_HOVER = window.matchMedia('(hover: hover)').matches;
 
-const PETAL_CONFIGS = Array.from({ length: CAN_HOVER ? 15 : 6 }, (_, i) => ({
+const PETAL_CONFIGS = Array.from({ length: CAN_HOVER ? 12 : 4 }, (_, i) => ({
   startLeft: `${Math.random() * 100}%`,
   endLeft: `${Math.random() * 100 + (Math.random() * 20 - 10)}%`,
   duration: 12 + Math.random() * 8,
@@ -493,10 +493,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let ticking = false;
     const handleScroll = () => {
-      setShowBackToTop(window.scrollY > 500);
+      if (!ticking) {
+        ticking = true;
+        requestAnimationFrame(() => {
+          setShowBackToTop(window.scrollY > 500);
+          ticking = false;
+        });
+      }
     };
-    window.addEventListener('scroll', handleScroll);
+    window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
@@ -712,8 +719,8 @@ export default function App() {
       
       {/* Decorative Background Elements */}
       <div className="absolute inset-0 pointer-events-none opacity-10 overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] md:w-[40%] md:h-[40%] rounded-full bg-[#8b0000] blur-[80px] md:blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] md:w-[40%] md:h-[40%] rounded-full bg-[#c5a059] blur-[80px] md:blur-[120px]" />
+        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] md:w-[40%] md:h-[40%] rounded-full bg-[#8b0000] blur-[40px] md:blur-[120px]" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] md:w-[40%] md:h-[40%] rounded-full bg-[#c5a059] blur-[40px] md:blur-[120px]" />
       </div>
 
       {/* Large Background Watermark '囍' - Adjusted for mobile */}
@@ -723,7 +730,7 @@ export default function App() {
         transition={{ duration: 3 }}
         className="absolute inset-0 flex items-center justify-center pointer-events-none z-0 overflow-hidden"
       >
-        <span className="text-[100vw] md:text-[60vw] font-brush text-[#8b0000] select-none leading-none">囍</span>
+        <span className="text-[80vw] md:text-[60vw] font-brush text-[#8b0000] select-none leading-none">囍</span>
       </motion.div>
 
       <AnimatePresence mode="wait">
@@ -1150,8 +1157,9 @@ export default function App() {
                         <img
                           src={img.url}
                           alt={img.caption}
-                          className="w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110"
+                          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                           referrerPolicy="no-referrer"
+                          loading="lazy"
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-[#8b0000]/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 flex flex-col justify-end p-8">
                           <motion.p 
@@ -2117,7 +2125,7 @@ export default function App() {
       <audio
         ref={audioRef}
         src={PLAYLIST[trackIndex].src}
-        preload="auto"
+        preload="metadata"
         onCanPlayThrough={() => setIsReady(true)}
         onEnded={() => setTrackIndex(prev => (prev + 1) % PLAYLIST.length)}
         onPlay={() => setIsPlaying(true)}
