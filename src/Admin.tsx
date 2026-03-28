@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { CardDesign, generateCardPng, CARD_W, CARD_H } from './InviteCardDesign';
 
 type Tab = 'guests' | 'rsvps' | 'guestbook' | 'gallery' | 'photos';
 
@@ -110,11 +112,96 @@ function GuestsTab({ password }: { password: string }) {
   const [guests, setGuests] = useState<any[]>([]);
   const [name, setName] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
+  const [generatingSlug, setGeneratingSlug] = useState<string | null>(null);
+  const [cardTimestamps, setCardTimestamps] = useState<Record<string, number>>({});
+  const cardContainerRef = useRef<HTMLDivElement>(null);
+  const generatingRef = useRef<Set<string>>(new Set());
+  // Pre-loaded card File objects — navigator.share requires sync access from user gesture
+  const cardFilesRef = useRef<Map<string, File>>(new Map());
+
+  const preloadCardFile = useCallback(async (slug: string) => {
+    if (cardFilesRef.current.has(slug)) return;
+    try {
+      const res = await fetch(`/cards/${slug}.png`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      cardFilesRef.current.set(slug, new File([blob], `wedding-invite-${slug}.png`, { type: 'image/png' }));
+    } catch { /* ignore */ }
+  }, []);
 
   const load = () => {
-    fetch('/api/guests', { headers: API_HEADERS(password) }).then(r => r.json()).then(setGuests);
+    fetch('/api/guests', { headers: API_HEADERS(password) })
+      .then(r => r.json())
+      .then((data: any[]) => {
+        setGuests(data);
+        data.filter(g => g.hasCard).forEach(g => preloadCardFile(g.slug));
+      });
   };
   useEffect(load, []);
+
+  const generateAndUploadCard = useCallback(async (slug: string): Promise<boolean> => {
+    const container = cardContainerRef.current;
+    if (!container || generatingRef.current.has(slug)) return false;
+
+    generatingRef.current.add(slug);
+    setGeneratingSlug(slug);
+    let mount: HTMLDivElement | null = null;
+    let root: Root | null = null;
+    try {
+      mount = document.createElement('div');
+      container.appendChild(mount);
+      root = createRoot(mount);
+      root.render(<CardDesign slug={slug} />);
+
+      // Wait for React render flush + font loading
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await document.fonts.ready;
+
+      const cardNode = mount.firstElementChild as HTMLElement;
+      if (!cardNode) throw new Error('Card not rendered');
+
+      const dataUrl = await generateCardPng(cardNode);
+      const blob = await (await fetch(dataUrl)).blob();
+
+      const uploadRes = await fetch(`/api/admin/cards/${slug}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${password}`, 'Content-Type': 'image/png' },
+        body: blob,
+      });
+
+      if (!uploadRes.ok) throw new Error('Upload failed');
+      return true;
+    } catch (err) {
+      console.error(`Card generation failed for ${slug}:`, err);
+      return false;
+    } finally {
+      root?.unmount();
+      if (mount?.parentNode) mount.parentNode.removeChild(mount);
+      generatingRef.current.delete(slug);
+      setGeneratingSlug(null);
+    }
+  }, [password]);
+
+  // Auto-generate cards for guests missing one (runs once on initial load)
+  const hasRunAutoGen = useRef(false);
+  useEffect(() => {
+    if (guests.length === 0 || hasRunAutoGen.current) return;
+    const missing = guests.filter(g => !g.hasCard);
+    if (missing.length === 0) return;
+    hasRunAutoGen.current = true;
+
+    let cancelled = false;
+    (async () => {
+      for (const guest of missing) {
+        if (cancelled) break;
+        const ok = await generateAndUploadCard(guest.slug);
+        if (ok && !cancelled) {
+          setGuests(prev => prev.map(g => g.id === guest.id ? { ...g, hasCard: true } : g));
+        }
+      }
+    })();
+    return () => { cancelled = true; hasRunAutoGen.current = false; };
+  }, [guests.length, generateAndUploadCard]);
 
   const addGuest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -126,16 +213,23 @@ function GuestsTab({ password }: { password: string }) {
         body: JSON.stringify({ name: name.trim() }),
       });
       if (!res.ok) throw new Error('Failed');
+      const newGuest = await res.json();
       setName('');
-      load();
+      setGuests(prev => [{ ...newGuest, hasCard: false, created_at: new Date().toISOString() }, ...prev]);
+
+      const ok = await generateAndUploadCard(newGuest.slug);
+      if (ok) {
+        setGuests(prev => prev.map(g => g.id === newGuest.id ? { ...g, hasCard: true } : g));
+      }
     } catch (err) {
       console.error('Failed to add guest:', err);
     }
   };
 
-  const deleteGuest = async (id: number) => {
+  const deleteGuest = async (id: number, slug: string) => {
+    cardFilesRef.current.delete(slug);
+    setGuests(prev => prev.filter(g => g.id !== id));
     await fetch(`/api/admin/guests/${id}`, { method: 'DELETE', headers: API_HEADERS(password) });
-    load();
   };
 
   const copyLink = (slug: string) => {
@@ -145,8 +239,31 @@ function GuestsTab({ password }: { password: string }) {
     setTimeout(() => setCopied(null), 2000);
   };
 
+  const shareCard = (slug: string) => {
+    const file = cardFilesRef.current.get(slug);
+    if (!file) return;
+    // Call navigator.share synchronously in click handler — gesture must be live
+    navigator.share({ files: [file], title: 'Wedding Invitation' }).catch(() => {});
+  };
+
+  const regenerateCard = async (slug: string) => {
+    cardFilesRef.current.delete(slug);
+    const ok = await generateAndUploadCard(slug);
+    if (ok) {
+      setGuests(prev => prev.map(g => g.slug === slug ? { ...g, hasCard: true } : g));
+      setCardTimestamps(prev => ({ ...prev, [slug]: Date.now() }));
+      preloadCardFile(slug);
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {/* Off-screen card renderer */}
+      <div
+        ref={cardContainerRef}
+        style={{ position: 'fixed', left: '-9999px', top: 0, width: `${CARD_W}px`, height: `${CARD_H}px`, overflow: 'hidden' }}
+      />
+
       <form onSubmit={addGuest} className="flex gap-3">
         <input
           value={name}
@@ -165,6 +282,7 @@ function GuestsTab({ password }: { password: string }) {
             <tr className="border-b border-gray-100 text-left text-xs text-gray-400 uppercase tracking-wider">
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Invite Link</th>
+              <th className="px-4 py-3">Card</th>
               <th className="px-4 py-3">Created</th>
               <th className="px-4 py-3 w-20"></th>
             </tr>
@@ -181,16 +299,51 @@ function GuestsTab({ password }: { password: string }) {
                     {copied === g.slug ? 'Copied!' : `/invite/${g.slug}`}
                   </button>
                 </td>
+                <td className="px-4 py-2">
+                  {generatingSlug === g.slug ? (
+                    <span className="text-xs text-amber-500">Generating...</span>
+                  ) : g.hasCard ? (
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={`/cards/${g.slug}.png${cardTimestamps[g.slug] ? `?t=${cardTimestamps[g.slug]}` : ''}`}
+                        alt=""
+                        className="rounded-sm border border-gray-100"
+                        style={{ width: '36px', height: '50px', objectFit: 'cover' }}
+                      />
+                      <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => shareCard(g.slug)}
+                          className="text-xs text-[#8b0000] hover:underline text-left"
+                        >
+                          Share
+                        </button>
+                        <button
+                          onClick={() => regenerateCard(g.slug)}
+                          className="text-xs text-gray-400 hover:text-gray-600 text-left"
+                        >
+                          Regen
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => regenerateCard(g.slug)}
+                      className="text-xs text-amber-600 hover:underline"
+                    >
+                      Generate
+                    </button>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-gray-400">{new Date(g.created_at).toLocaleDateString()}</td>
                 <td className="px-4 py-3">
-                  <button onClick={() => deleteGuest(g.id)} className="text-xs text-red-400 hover:text-red-600 transition-colors">
+                  <button onClick={() => deleteGuest(g.id, g.slug)} className="text-xs text-red-400 hover:text-red-600 transition-colors">
                     Delete
                   </button>
                 </td>
               </tr>
             ))}
             {guests.length === 0 && (
-              <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No guests yet</td></tr>
+              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No guests yet</td></tr>
             )}
           </tbody>
         </table>

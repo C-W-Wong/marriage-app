@@ -19,6 +19,9 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const weddingPhotosDir = join(__dirname, 'wedding-photos');
 if (!fs.existsSync(weddingPhotosDir)) fs.mkdirSync(weddingPhotosDir, { recursive: true });
 
+const cardsDir = join(__dirname, 'cards');
+if (!fs.existsSync(cardsDir)) fs.mkdirSync(cardsDir, { recursive: true });
+
 // #5/#6: Whitelist extensions and validate magic bytes
 const ALLOWED_IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif']);
 const ALLOWED_VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
@@ -152,6 +155,7 @@ const staticSecurityHeaders = (res: express.Response) => {
 app.use('/uploads', express.static(uploadsDir, { setHeaders: staticSecurityHeaders }));
 app.use('/gallery-images', express.static(galleryDir, { setHeaders: staticSecurityHeaders }));
 app.use('/wedding-photos', express.static(weddingPhotosDir, { setHeaders: staticSecurityHeaders }));
+app.use('/cards', express.static(cardsDir, { setHeaders: staticSecurityHeaders }));
 
 // #4: Rate limiting
 const loginLimiter = rateLimit({
@@ -300,9 +304,15 @@ function adminAuth(req: express.Request, res: express.Response, next: express.Ne
 // --- API Routes ---
 
 // #12: Guest list requires admin auth now
-app.get('/api/guests', adminAuth, (_req, res) => {
-  const guests = db.prepare('SELECT id, slug, name, created_at FROM guests ORDER BY created_at DESC').all();
-  res.json(guests);
+app.get('/api/guests', adminAuth, async (_req, res) => {
+  const guests = db.prepare('SELECT id, slug, name, created_at FROM guests ORDER BY created_at DESC').all() as any[];
+  const files = await fs.promises.readdir(cardsDir);
+  const existingCards = new Set(files.filter(f => f.endsWith('.png')).map(f => f.slice(0, -4)));
+  const result = guests.map(g => ({
+    ...g,
+    hasCard: existingCards.has(g.slug),
+  }));
+  res.json(result);
 });
 
 app.get('/api/guests/:slug', (req, res) => {
@@ -676,8 +686,30 @@ app.post('/api/admin/login', loginLimiter, (req, res) => {
 app.delete('/api/admin/guests/:id', adminAuth, (req, res) => {
   const id = parseIntParam(req.params.id);
   if (id === null) { res.status(400).json({ error: 'Invalid ID' }); return; }
+  const guest = db.prepare('SELECT slug FROM guests WHERE id = ?').get(id) as { slug: string } | undefined;
+  if (guest) {
+    try { fs.unlinkSync(join(cardsDir, `${guest.slug}.png`)); } catch (e: any) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+  }
+  // Clean up related records to avoid orphans
+  db.prepare('DELETE FROM rsvp WHERE guest_id = ?').run(id);
   db.prepare('DELETE FROM guests WHERE id = ?').run(id);
   res.json({ ok: true });
+});
+
+// Admin: Invite cards — upload generated card PNG
+app.post('/api/admin/cards/:slug', adminAuth, express.raw({ type: 'image/png', limit: '5mb' }), async (req, res) => {
+  const { slug } = req.params;
+  if (!slug || !/^[a-z0-9-]+$/.test(slug)) {
+    res.status(400).json({ error: 'Invalid slug' }); return;
+  }
+  const guest = db.prepare('SELECT id FROM guests WHERE slug = ?').get(slug);
+  if (!guest) { res.status(404).json({ error: 'Guest not found' }); return; }
+  if (!Buffer.isBuffer(req.body)) { res.status(400).json({ error: 'Expected PNG binary' }); return; }
+  const cardPath = join(cardsDir, `${slug}.png`);
+  await fs.promises.writeFile(cardPath, req.body);
+  res.json({ ok: true, url: `/cards/${slug}.png` });
 });
 
 // Admin: RSVPs
