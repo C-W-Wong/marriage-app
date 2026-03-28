@@ -931,13 +931,6 @@ export default function App() {
                 />
 
                 <div className="flex flex-col items-center space-y-3">
-                  <button
-                    onClick={downloadICS}
-                    className="flex items-center gap-1.5 text-[#c5a059] hover:text-[#8b0000] font-serif text-xs uppercase tracking-widest transition-colors"
-                  >
-                    <CalendarPlus size={12} />
-                    <span>Add to Calendar</span>
-                  </button>
                   <p className="text-3xl md:text-5xl font-serif font-light">May 20, 2026</p>
                   <div className="flex items-center gap-2">
                     <motion.button
