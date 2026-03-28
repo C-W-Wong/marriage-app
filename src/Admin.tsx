@@ -355,6 +355,8 @@ function GalleryTab({ password }: { password: string }) {
   const [images, setImages] = useState<any[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [caption, setCaption] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [uploading, setUploading] = useState(false);
 
   const load = () => {
     fetch('/api/gallery').then(r => r.json()).then(setImages);
@@ -364,17 +366,30 @@ function GalleryTab({ password }: { password: string }) {
   const addImage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || !caption.trim()) return;
-    const formData = new FormData();
-    formData.append('image', file);
-    formData.append('caption', caption.trim());
-    await fetch('/api/admin/gallery/upload', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${password}` },
-      body: formData,
-    });
-    setFile(null);
-    setCaption('');
-    load();
+    setUploadError('');
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('image', file);
+      formData.append('caption', caption.trim());
+      const res = await fetch('/api/admin/gallery/upload', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${password}` },
+        body: formData,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Upload failed' }));
+        setUploadError(data.error || `Upload failed (${res.status})`);
+        return;
+      }
+      setFile(null);
+      setCaption('');
+      load();
+    } catch {
+      setUploadError('Network error — please try again');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const deleteImage = async (id: number) => {
@@ -420,10 +435,16 @@ function GalleryTab({ password }: { password: string }) {
           placeholder="Caption"
           className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#8b0000] transition-colors"
         />
-        <button className="px-5 py-2.5 bg-[#8b0000] text-white rounded-lg text-sm font-medium hover:bg-[#a00000] transition-colors whitespace-nowrap">
-          Upload
+        <button
+          disabled={uploading}
+          className="px-5 py-2.5 bg-[#8b0000] text-white rounded-lg text-sm font-medium hover:bg-[#a00000] transition-colors whitespace-nowrap disabled:opacity-50"
+        >
+          {uploading ? 'Uploading...' : 'Upload'}
         </button>
       </form>
+      {uploadError && (
+        <p className="text-red-600 text-sm -mt-3">{uploadError}</p>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         {images.map((img: any, idx: number) => (
