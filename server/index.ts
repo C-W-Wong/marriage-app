@@ -131,7 +131,7 @@ app.use(helmet({
       imgSrc: ["'self'", "data:", "https:", "blob:"],
       frameSrc: ["'self'", "https://maps.google.com", "https://www.google.com", "https://maps.googleapis.com"],
       mediaSrc: ["'self'", "blob:"],
-      connectSrc: ["'self'", "https://calendar.google.com", "https://maps.apple.com"],
+      connectSrc: ["'self'", "data:", "https://calendar.google.com", "https://maps.apple.com", "https://fonts.googleapis.com", "https://fonts.gstatic.com"],
     },
   },
   crossOriginEmbedderPolicy: false, // needed for Google Maps iframe
