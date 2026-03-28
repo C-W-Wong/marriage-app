@@ -13,6 +13,7 @@ services:
       - uploads:/app/server/uploads
       - wedding-photos:/app/server/wedding-photos
       - gallery-images:/app/server/gallery-images
+      - cards:/app/server/cards
     networks:
       - traefik_network
     labels:
@@ -31,6 +32,7 @@ volumes:
   uploads:
   wedding-photos:
   gallery-images:
+  cards:
 
 networks:
   traefik_network:
