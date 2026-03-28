@@ -2031,13 +2031,23 @@ export default function App() {
                   transition={{ duration: 0.15 }}
                   className="relative px-3.5 py-2.5 flex items-center gap-2.5"
                 >
-                  {/* Spinning disc */}
+                  {/* Spinning disc with play/pause overlay on mobile */}
                   <motion.div
                     animate={isPlaying ? { rotate: 360 } : {}}
                     transition={isPlaying ? { duration: 3, repeat: Infinity, ease: 'linear' } : { duration: 0 }}
-                    className="w-7 h-7 rounded-full bg-gradient-to-br from-[#8b0000] to-[#4a0000] flex items-center justify-center flex-shrink-0 border border-[#c5a059]/15"
+                    className="w-7 h-7 rounded-full bg-gradient-to-br from-[#8b0000] to-[#4a0000] flex items-center justify-center flex-shrink-0 border border-[#c5a059]/15 relative"
                   >
-                    <div className="w-1.5 h-1.5 rounded-full bg-[#c5a059]/50" />
+                    {CAN_HOVER ? (
+                      <div className="w-1.5 h-1.5 rounded-full bg-[#c5a059]/50" />
+                    ) : (
+                      <div className="text-[#c5a059]/80">
+                        {isPlaying ? (
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                        ) : (
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="8 3 21 12 8 21"/></svg>
+                        )}
+                      </div>
+                    )}
                   </motion.div>
                   {/* Sound bars */}
                   <div className="flex items-end gap-[2px] h-3.5 flex-shrink-0">
@@ -2074,8 +2084,8 @@ export default function App() {
                     >
                       <div className="w-2 h-2 rounded-full bg-[#c5a059]/60" />
                     </motion.div>
-                    <div className="absolute inset-0 rounded-xl bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
-                      <div className="opacity-0 group-hover:opacity-100 transition-opacity text-white">
+                    <div className="absolute inset-0 rounded-xl bg-black/0 md:group-hover:bg-black/30 transition-colors flex items-center justify-center">
+                      <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity text-white">
                         {isPlaying ? (
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
                         ) : (
