@@ -1228,74 +1228,111 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.3 }}
-                      className="text-center py-12 space-y-6"
+                      className="text-center py-6 md:py-10"
                     >
-                      <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto">
-                        <CheckCircle2 className="text-green-500 w-12 h-12" />
+                      <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <CheckCircle2 className="text-green-500 w-10 h-10" />
                       </div>
                       <h3 className="text-2xl md:text-3xl font-serif text-[#1a1a1a]">Thank You!</h3>
-                      <p className="text-gray-500 font-serif">
+                      <p className="text-gray-500 font-serif mt-2 mb-6">
                         {rsvpData.attending
                           ? "Your response has been received. We can't wait to celebrate with you!"
                           : "We're sorry you can't make it, but we appreciate you letting us know."}
                       </p>
-                      <div className="pt-4 border-t border-gray-100 space-y-4">
-                        {rsvpData.attending && (
-                          <button
-                            onClick={downloadICS}
-                            className="px-6 py-3 bg-[#c5a059] text-white rounded-full font-serif uppercase tracking-widest text-xs shadow-lg hover:bg-[#b8933e] transition-colors inline-flex items-center gap-2"
-                          >
-                            <CalendarPlus size={14} />
-                            <span>Add to Calendar</span>
-                          </button>
-                        )}
-                        <p className="text-sm font-serif text-gray-400 italic">
-                          Would you like to leave a wish for us?
-                        </p>
-                        <button
-                          onClick={() => {
-                            setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
-                            setRsvpStatus('idle');
-                          }}
-                          className="px-6 py-3 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-widest text-xs shadow-lg hover:bg-[#a00000] transition-colors inline-flex items-center gap-2"
-                        >
-                          <MessageSquare size={14} />
-                          <span>Leave a Wish</span>
-                        </button>
-                      </div>
-                      <div className="pt-4 border-t border-gray-100 space-y-3">
-                        <p className="text-sm font-serif text-gray-400 italic">
-                          Check out our photo gallery and share your moments!
-                        </p>
-                        <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-                          <button
-                            onClick={() => {
-                              setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
-                              setRsvpStatus('idle');
-                            }}
-                            className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-xs hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
-                          >
-                            <Images size={14} />
-                            <span>Photo Gallery</span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              setVisibleSections(prev => ({ ...prev, rsvp: false, photoalbum: true }));
-                              setRsvpStatus('idle');
-                            }}
-                            className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-xs hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
-                          >
-                            <Camera size={14} />
-                            <span>Photo Album</span>
-                          </button>
-                        </div>
-                      </div>
+
+                      {rsvpData.attending && (
+                        <>
+                          <div className="h-px w-16 bg-[#c5a059]/40 mx-auto mb-6" />
+                          <p className="text-xs uppercase tracking-widest text-[#c5a059] font-serif font-semibold mb-5">Here's what you can do next</p>
+
+                          <div className="space-y-3 max-w-sm mx-auto text-left">
+                            {/* Step 1: Calendar */}
+                            <motion.div
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: 0.15 }}
+                              className="flex items-start gap-3 group"
+                            >
+                              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#c5a059] text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">1</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-serif text-gray-500 mb-1.5">Save the date so you don't forget!</p>
+                                <button
+                                  onClick={downloadICS}
+                                  className="w-full px-4 py-2.5 bg-[#c5a059] text-white rounded-full font-serif uppercase tracking-widest text-[10px] shadow hover:bg-[#b8933e] transition-colors inline-flex items-center justify-center gap-2"
+                                >
+                                  <CalendarPlus size={13} />
+                                  <span>Add to Calendar</span>
+                                </button>
+                              </div>
+                            </motion.div>
+
+                            {/* Step 2: Guest Book */}
+                            <motion.div
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: 0.3 }}
+                              className="flex items-start gap-3 group"
+                            >
+                              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#8b0000] text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">2</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-serif text-gray-500 mb-1.5">Send us a message or well-wish!</p>
+                                <button
+                                  onClick={() => {
+                                    setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
+                                    setRsvpStatus('idle');
+                                  }}
+                                  className="w-full px-4 py-2.5 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-widest text-[10px] shadow hover:bg-[#a00000] transition-colors inline-flex items-center justify-center gap-2"
+                                >
+                                  <MessageSquare size={13} />
+                                  <span>Leave a Wish</span>
+                                </button>
+                              </div>
+                            </motion.div>
+
+                            {/* Step 3: Gallery & Album */}
+                            <motion.div
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: 0.45 }}
+                              className="flex items-start gap-3 group"
+                            >
+                              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#c5a059]/80 text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">3</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-serif text-gray-500 mb-1.5">Browse our photos and share yours on the big day!</p>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
+                                      setRsvpStatus('idle');
+                                    }}
+                                    className="flex-1 px-3 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center justify-center gap-1.5"
+                                  >
+                                    <Images size={12} />
+                                    <span>Gallery</span>
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setVisibleSections(prev => ({ ...prev, rsvp: false, photoalbum: true }));
+                                      setRsvpStatus('idle');
+                                    }}
+                                    className="flex-1 px-3 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center justify-center gap-1.5"
+                                  >
+                                    <Camera size={12} />
+                                    <span>Album</span>
+                                  </button>
+                                </div>
+                              </div>
+                            </motion.div>
+                          </div>
+                        </>
+                      )}
+
                       <button
                         onClick={() => {
                           setVisibleSections(prev => ({ ...prev, rsvp: false }));
                           setRsvpStatus('idle');
                         }}
-                        className="text-gray-400 font-serif text-xs uppercase tracking-widest hover:text-gray-600 transition-colors"
+                        className="mt-6 text-gray-400 font-serif text-xs uppercase tracking-widest hover:text-gray-600 transition-colors"
                       >
                         Close
                       </button>
