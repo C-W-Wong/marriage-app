@@ -1083,7 +1083,7 @@ export default function App() {
             >
               <MessageSquare size={16} className="text-[#c5a059]/60 group-hover:text-[#8b0000] transition-colors" />
               <span className="text-sm font-serif text-gray-400 group-hover:text-[#8b0000] transition-colors">
-                Leave a wish for the couple
+                Leave a wish for us
               </span>
             </button>
           </motion.div>
@@ -1526,7 +1526,7 @@ export default function App() {
                       transition={{ duration: 0.8, delay: 0.6 }}
                       className="text-gray-500 font-serif italic text-base md:text-lg"
                     >
-                      Leave a wish for the happy couple
+                      Leave a wish for us
                     </motion.p>
                   </div>
 
