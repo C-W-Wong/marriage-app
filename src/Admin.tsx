@@ -267,7 +267,7 @@ function GuestsTab({ password }: { password: string }) {
         style={{ position: 'fixed', left: '-9999px', top: 0, width: `${CARD_W}px`, height: `${CARD_H}px`, overflow: 'hidden' }}
       />
 
-      <form onSubmit={addGuest} className="flex gap-3">
+      <form onSubmit={addGuest} className="flex flex-col sm:flex-row gap-3">
         <input
           value={name}
           onChange={e => setName(e.target.value)}
@@ -279,7 +279,73 @@ function GuestsTab({ password }: { password: string }) {
         </button>
       </form>
 
-      <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+      {/* Mobile: card layout */}
+      <div className="sm:hidden space-y-3">
+        {guests.map((g: any) => (
+          <div key={g.id} className="bg-white rounded-xl border border-gray-100 p-4">
+            <div className="flex items-start gap-3">
+              {/* Card thumbnail */}
+              {g.hasCard && generatingSlug !== g.slug ? (
+                <img
+                  src={`/cards/${g.slug}.png${cardTimestamps[g.slug] ? `?t=${cardTimestamps[g.slug]}` : ''}`}
+                  alt=""
+                  className="rounded-sm border border-gray-100 shrink-0"
+                  style={{ width: '48px', height: '67px', objectFit: 'cover' }}
+                />
+              ) : null}
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-[#1a1a1a] text-sm">{g.name}</p>
+                <button
+                  onClick={() => copyLink(g.slug)}
+                  className="text-[10px] text-[#8b0000] hover:underline font-mono mt-0.5 block truncate max-w-full"
+                >
+                  {copied === g.slug ? 'Copied!' : `/invite/${g.slug}`}
+                </button>
+                <p className="text-[10px] text-gray-400 mt-1">{new Date(g.created_at).toLocaleDateString()}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-50">
+              {generatingSlug === g.slug ? (
+                <span className="text-xs text-amber-500">Generating...</span>
+              ) : g.hasCard ? (
+                <>
+                  <button
+                    onClick={() => shareCard(g.slug, g.name)}
+                    className="flex-1 py-2 bg-[#8b0000] text-white rounded-lg text-xs font-medium hover:bg-[#a00000] transition-colors"
+                  >
+                    Share
+                  </button>
+                  <button
+                    onClick={() => regenerateCard(g.slug)}
+                    className="py-2 px-3 text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg transition-colors"
+                  >
+                    Regen
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => regenerateCard(g.slug)}
+                  className="flex-1 py-2 bg-amber-50 text-amber-700 rounded-lg text-xs font-medium hover:bg-amber-100 transition-colors"
+                >
+                  Generate Card
+                </button>
+              )}
+              <button
+                onClick={() => deleteGuest(g.id, g.slug)}
+                className="py-2 px-3 text-xs text-red-400 hover:text-red-600 border border-gray-200 rounded-lg transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ))}
+        {guests.length === 0 && (
+          <p className="text-center text-gray-400 py-8">No guests yet</p>
+        )}
+      </div>
+
+      {/* Desktop: table layout */}
+      <div className="hidden sm:block bg-white rounded-xl border border-gray-100 overflow-hidden">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-100 text-left text-xs text-gray-400 uppercase tracking-wider">
