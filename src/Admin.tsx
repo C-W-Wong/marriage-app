@@ -239,11 +239,14 @@ function GuestsTab({ password }: { password: string }) {
     setTimeout(() => setCopied(null), 2000);
   };
 
-  const shareCard = (slug: string) => {
+  const shareCard = (slug: string, guestName: string) => {
     const file = cardFilesRef.current.get(slug);
     if (!file) return;
-    // Call navigator.share synchronously in click handler — gesture must be live
-    navigator.share({ files: [file], title: 'Wedding Invitation' }).catch(() => {});
+    navigator.share({
+      files: [file],
+      title: 'Wedding Invitation',
+      text: `Hello ${guestName},\n\nWe want to share some wonderful news with you — we're getting married! It would mean the world to us to have you there to celebrate this special day.\n\nPlease join us on May 20th, 2026, at 8:20 AM at the Old Orange County Courthouse in Santa Ana, California.\n\nKindly RSVP and find all the details here:\nhttps://chris-eileen.com/invite/${slug}\n\nWith love,\nChris & Eileen`,
+    }).catch(() => {});
   };
 
   const regenerateCard = async (slug: string) => {
@@ -312,7 +315,7 @@ function GuestsTab({ password }: { password: string }) {
                       />
                       <div className="flex flex-col gap-1">
                         <button
-                          onClick={() => shareCard(g.slug)}
+                          onClick={() => shareCard(g.slug, g.name)}
                           className="text-xs text-[#8b0000] hover:underline text-left"
                         >
                           Share
