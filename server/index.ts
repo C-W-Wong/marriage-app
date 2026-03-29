@@ -333,7 +333,7 @@ app.get('/api/gallery', (_req, res) => {
 // Guest Book
 app.get('/api/guest-book', (_req, res) => {
   // #16: Add pagination
-  const entries = db.prepare('SELECT id, name, message, photo_url, created_at FROM guest_book ORDER BY created_at DESC LIMIT 100').all() as any[];
+  const entries = db.prepare('SELECT id, name, message, photo_url, created_at FROM guest_book ORDER BY created_at ASC LIMIT 100').all() as any[];
   const entryIds = entries.map(e => e.id);
   if (entryIds.length === 0) { res.json([]); return; }
 

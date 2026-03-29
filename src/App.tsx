@@ -174,15 +174,19 @@ const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: Gue
 
   return (
     <div className="bg-[#fdfaf6] p-5 rounded-2xl border border-[#c5a059]/10 relative">
-      {entry.photo_url && (
-        <div className="w-full rounded-2xl mb-3 overflow-hidden border border-[#c5a059]/10 shadow-sm bg-gray-50">
-          {isVideo ? (
-            <video src={entry.photo_url} controls playsInline className="w-full max-h-80" />
+      <div className="w-full h-48 rounded-2xl mb-3 overflow-hidden border border-[#c5a059]/10 bg-gray-50">
+        {entry.photo_url ? (
+          isVideo ? (
+            <video src={entry.photo_url} controls playsInline className="w-full h-full object-cover" />
           ) : (
-            <img src={entry.photo_url} alt="" className="w-full max-h-80 object-contain" />
-          )}
-        </div>
-      )}
+            <img src={entry.photo_url} alt="" className="w-full h-full object-cover" loading="lazy" />
+          )
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <Heart size={24} className="text-[#c5a059]/15" />
+          </div>
+        )}
+      </div>
       <p className="text-gray-700 font-serif italic mb-3 leading-relaxed text-sm">"{entry.message}"</p>
       <div className="flex items-center justify-between mb-2">
         <span className="text-[#8b0000] font-serif font-medium text-xs">— {entry.name}</span>
@@ -416,7 +420,7 @@ export default function App() {
       const res = await fetch('/api/guest-book', { method: 'POST', body: formData });
       if (!res.ok) throw new Error('Failed to post');
       const newEntry = await res.json();
-      setGuestBookEntries(prev => [{ ...newEntry, likes: 0, replies: [] }, ...prev]);
+      setGuestBookEntries(prev => [...prev, { ...newEntry, likes: 0, replies: [] }]);
       setGuestBookStatus('success');
       setGuestBookData({ name: '', message: '' });
       setGuestBookPhoto(null);
@@ -451,6 +455,7 @@ export default function App() {
     validateRsvp(field, value);
   };
   const audioRef = useRef<HTMLAudioElement>(null);
+  const guestBookScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Defer audio preload until after initial render
@@ -542,6 +547,15 @@ export default function App() {
     });
     return () => cancelAnimationFrame(id);
   }, [step]);
+
+  // Auto-scroll guest book to newest (bottom) when visible
+  useEffect(() => {
+    if (visibleSections.guestbook && guestBookScrollRef.current) {
+      requestAnimationFrame(() => {
+        guestBookScrollRef.current?.scrollTo({ top: guestBookScrollRef.current.scrollHeight, behavior: 'smooth' });
+      });
+    }
+  }, [visibleSections.guestbook, guestBookEntries.length]);
 
   // Photo Album
   const photoAlbumLoadingRef = useRef(false);
@@ -1678,7 +1692,7 @@ export default function App() {
                     </div>
 
                     {/* Messages Section */}
-                    <div className="space-y-6 max-h-[500px] overflow-y-auto hearty-scrollbar pr-4">
+                    <div ref={guestBookScrollRef} className="space-y-6 max-h-[500px] overflow-y-auto hearty-scrollbar pr-4">
                       <h3 className="text-xl font-serif text-[#1a1a1a] border-b border-gray-100 pb-4">Recent Wishes</h3>
                       {guestBookEntries.length === 0 ? (
                         <p className="text-gray-400 font-serif italic text-center py-12">No messages yet. Be the first!</p>
