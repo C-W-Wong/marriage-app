@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, Suspense, ErrorInfo, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun, CalendarPlus, Images } from 'lucide-react';
+import { Heart, MapPin, Send, CheckCircle2, Users, User, AlertCircle, ChevronUp, X, MessageSquare, Camera, CloudSun, CalendarPlus, Images, Play, Pause } from 'lucide-react';
 import { downloadICS, weddingDate } from './weddingConfig';
 
 // Lazy load non-critical components — invitation card renders first
@@ -132,7 +132,7 @@ const TypingEffect = ({ text, speed = 100, onComplete }: { text: string, speed?:
 
 
 
-const GuestBookCard = ({ entry, userName, onUpdate }: { key?: number; entry: GuestBookEntry; userName: string; onUpdate: (e: GuestBookEntry) => void }) => {
+const GuestBookCard = ({ entry, userName, onUpdate }: { key?: React.Key; entry: GuestBookEntry; userName: string; onUpdate: (e: GuestBookEntry) => void }) => {
   const [showReplies, setShowReplies] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [replyName, setReplyName] = useState(userName);
@@ -438,6 +438,15 @@ export default function App() {
   });
   const canUploadPhotos = hasRsvped && rsvpData.attending && !!(guestInfo?.name || guestBookData.name);
 
+  const navigateFromRsvp = useCallback((target?: 'gallery' | 'guestbook' | 'photoalbum') => {
+    setVisibleSections(prev => ({
+      ...prev,
+      rsvp: false,
+      ...(target ? { [target]: true } : {}),
+    }));
+    setRsvpStatus('idle');
+  }, []);
+
   const validateRsvp = (field: string, value: any) => {
     let error = '';
     switch (field) {
@@ -499,11 +508,16 @@ export default function App() {
 
   useEffect(() => {
     let ticking = false;
+    let lastValue = window.scrollY > 500;
     const handleScroll = () => {
       if (!ticking) {
         ticking = true;
         requestAnimationFrame(() => {
-          setShowBackToTop(window.scrollY > 500);
+          const show = window.scrollY > 500;
+          if (show !== lastValue) {
+            lastValue = show;
+            setShowBackToTop(show);
+          }
           ticking = false;
         });
       }
@@ -548,13 +562,12 @@ export default function App() {
     return () => cancelAnimationFrame(id);
   }, [step]);
 
-  // Auto-scroll guest book to newest (bottom) when visible
   useEffect(() => {
-    if (visibleSections.guestbook && guestBookScrollRef.current) {
-      requestAnimationFrame(() => {
-        guestBookScrollRef.current?.scrollTo({ top: guestBookScrollRef.current.scrollHeight, behavior: 'smooth' });
-      });
-    }
+    if (!visibleSections.guestbook || !guestBookScrollRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      guestBookScrollRef.current?.scrollTo({ top: guestBookScrollRef.current.scrollHeight, behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(raf);
   }, [visibleSections.guestbook, guestBookEntries.length]);
 
   // Photo Album
@@ -1262,18 +1275,18 @@ export default function App() {
                           : "We're sorry you can't make it, but we appreciate you letting us know."}
                       </p>
 
-                      {rsvpData.attending && (
+                      <div className="h-px w-16 bg-[#c5a059]/40 mx-auto mb-6" />
+
+                      {rsvpData.attending ? (
                         <>
-                          <div className="h-px w-16 bg-[#c5a059]/40 mx-auto mb-6" />
                           <p className="text-xs uppercase tracking-widest text-[#c5a059] font-serif font-semibold mb-5">Here's what you can do next</p>
 
                           <div className="space-y-3 max-w-sm mx-auto text-left">
-                            {/* Step 1: Calendar */}
                             <motion.div
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               transition={{ delay: 0.15 }}
-                              className="flex items-start gap-3 group"
+                              className="flex items-start gap-3"
                             >
                               <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#c5a059] text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">1</span>
                               <div className="flex-1 min-w-0">
@@ -1288,21 +1301,17 @@ export default function App() {
                               </div>
                             </motion.div>
 
-                            {/* Step 2: Guest Book */}
                             <motion.div
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               transition={{ delay: 0.3 }}
-                              className="flex items-start gap-3 group"
+                              className="flex items-start gap-3"
                             >
                               <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#8b0000] text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">2</span>
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-serif text-gray-500 mb-1.5">Send us a message or well-wish!</p>
                                 <button
-                                  onClick={() => {
-                                    setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
-                                    setRsvpStatus('idle');
-                                  }}
+                                  onClick={() => navigateFromRsvp('guestbook')}
                                   className="w-full px-4 py-2.5 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-widest text-[10px] shadow hover:bg-[#a00000] transition-colors inline-flex items-center justify-center gap-2"
                                 >
                                   <MessageSquare size={13} />
@@ -1311,32 +1320,25 @@ export default function App() {
                               </div>
                             </motion.div>
 
-                            {/* Step 3: Gallery & Album */}
                             <motion.div
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               transition={{ delay: 0.45 }}
-                              className="flex items-start gap-3 group"
+                              className="flex items-start gap-3"
                             >
                               <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#c5a059]/80 text-white text-xs flex items-center justify-center font-serif font-bold mt-0.5">3</span>
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-serif text-gray-500 mb-1.5">Browse our photos and share yours on the big day!</p>
                                 <div className="flex gap-2">
                                   <button
-                                    onClick={() => {
-                                      setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
-                                      setRsvpStatus('idle');
-                                    }}
+                                    onClick={() => navigateFromRsvp('gallery')}
                                     className="flex-1 px-3 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center justify-center gap-1.5"
                                   >
                                     <Images size={12} />
                                     <span>Gallery</span>
                                   </button>
                                   <button
-                                    onClick={() => {
-                                      setVisibleSections(prev => ({ ...prev, rsvp: false, photoalbum: true }));
-                                      setRsvpStatus('idle');
-                                    }}
+                                    onClick={() => navigateFromRsvp('photoalbum')}
                                     className="flex-1 px-3 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center justify-center gap-1.5"
                                   >
                                     <Camera size={12} />
@@ -1347,30 +1349,21 @@ export default function App() {
                             </motion.div>
                           </div>
                         </>
-                      )}
-
-                      {!rsvpData.attending && (
+                      ) : (
                         <>
-                          <div className="h-px w-16 bg-[#c5a059]/40 mx-auto mb-5" />
                           <p className="text-sm font-serif text-gray-400 italic mb-4">
                             Even though you can't make it, we'd love to hear from you!
                           </p>
                           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
                             <button
-                              onClick={() => {
-                                setVisibleSections(prev => ({ ...prev, rsvp: false, guestbook: true }));
-                                setRsvpStatus('idle');
-                              }}
+                              onClick={() => navigateFromRsvp('guestbook')}
                               className="px-5 py-2.5 bg-[#8b0000] text-white rounded-full font-serif uppercase tracking-widest text-[10px] shadow hover:bg-[#a00000] transition-colors inline-flex items-center gap-2"
                             >
                               <MessageSquare size={13} />
                               <span>Leave a Wish</span>
                             </button>
                             <button
-                              onClick={() => {
-                                setVisibleSections(prev => ({ ...prev, rsvp: false, gallery: true }));
-                                setRsvpStatus('idle');
-                              }}
+                              onClick={() => navigateFromRsvp('gallery')}
                               className="px-5 py-2.5 border border-[#c5a059] text-[#c5a059] rounded-full font-serif uppercase tracking-widest text-[10px] hover:bg-[#c5a059] hover:text-white transition-colors inline-flex items-center gap-2"
                             >
                               <Images size={13} />
@@ -1381,10 +1374,7 @@ export default function App() {
                       )}
 
                       <button
-                        onClick={() => {
-                          setVisibleSections(prev => ({ ...prev, rsvp: false }));
-                          setRsvpStatus('idle');
-                        }}
+                        onClick={() => navigateFromRsvp()}
                         className="mt-6 text-gray-400 font-serif text-xs uppercase tracking-widest hover:text-gray-600 transition-colors"
                       >
                         Close
@@ -2084,14 +2074,10 @@ export default function App() {
                   >
                     {CAN_HOVER ? (
                       <div className="w-1.5 h-1.5 rounded-full bg-[#c5a059]/50" />
+                    ) : isPlaying ? (
+                      <Pause size={10} fill="currentColor" className="text-[#c5a059]/80" />
                     ) : (
-                      <div className="text-[#c5a059]/80">
-                        {isPlaying ? (
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-                        ) : (
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="8 3 21 12 8 21"/></svg>
-                        )}
-                      </div>
+                      <Play size={10} fill="currentColor" className="text-[#c5a059]/80" />
                     )}
                   </motion.div>
                   {/* Sound bars */}
@@ -2129,14 +2115,12 @@ export default function App() {
                     >
                       <div className="w-2 h-2 rounded-full bg-[#c5a059]/60" />
                     </motion.div>
-                    <div className="absolute inset-0 rounded-xl bg-black/0 md:group-hover:bg-black/30 transition-colors flex items-center justify-center">
-                      <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity text-white">
-                        {isPlaying ? (
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-                        ) : (
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 3 20 12 7 21"/></svg>
-                        )}
-                      </div>
+                    <div className="absolute inset-0 rounded-xl bg-black/0 md:group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity text-white">
+                      {isPlaying ? (
+                        <Pause size={14} fill="currentColor" />
+                      ) : (
+                        <Play size={14} fill="currentColor" />
+                      )}
                     </div>
                   </button>
 
