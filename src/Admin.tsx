@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { CardDesign, generateCardPng, CARD_W, CARD_H } from './InviteCardDesign';
 
-type Tab = 'guests' | 'rsvps' | 'guestbook' | 'gallery' | 'photos';
+type Tab = 'guests' | 'rsvps' | 'guestbook' | 'gallery' | 'photos' | 'shares';
 
 const API_HEADERS = (password: string) => ({
   'Content-Type': 'application/json',
@@ -68,6 +68,7 @@ export default function Admin() {
     { key: 'guestbook', label: 'Guest Book' },
     { key: 'gallery', label: 'Gallery' },
     { key: 'photos', label: 'Photo Album' },
+    { key: 'shares', label: 'Photo Shares' },
   ];
 
   return (
@@ -103,6 +104,7 @@ export default function Admin() {
         {tab === 'guestbook' && <GuestBookTab password={password} />}
         {tab === 'gallery' && <GalleryTab password={password} />}
         {tab === 'photos' && <PhotosTab password={password} />}
+        {tab === 'shares' && <SharesTab password={password} />}
       </main>
     </div>
   );
@@ -702,6 +704,153 @@ function GalleryTab({ password }: { password: string }) {
           <p className="col-span-full text-center text-gray-400 py-12">No images yet</p>
         )}
       </div>
+    </div>
+  );
+}
+
+type PhotoGroup = {
+  id: string;
+  display_name: string;
+  access_token: string | null;
+  can_download: boolean;
+  photo_count: number;
+};
+
+function SharesTab({ password }: { password: string }) {
+  const [groups, setGroups] = useState<PhotoGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/admin/photo-groups', { headers: API_HEADERS(password) });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      setGroups(await res.json());
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [password]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const linkFor = (token: string | null) =>
+    token ? `${window.location.origin}/photos/${token}` : '';
+
+  const copy = async (token: string) => {
+    await navigator.clipboard.writeText(linkFor(token));
+    setCopied(token);
+    setTimeout(() => setCopied((c) => (c === token ? null : c)), 1500);
+  };
+
+  const regenerate = async (id: string) => {
+    if (!confirm('Regenerate this share link? The current link will stop working immediately.')) return;
+    setBusy(id);
+    try {
+      const res = await fetch(`/api/admin/photo-groups/${encodeURIComponent(id)}/regenerate-token`, {
+        method: 'POST',
+        headers: API_HEADERS(password),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      await load();
+    } catch (err) {
+      alert(`Failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-6">
+        <div>
+          <h2 className="text-xl font-serif text-[#1a1a1a]">Photo Gallery Share Links</h2>
+          <p className="text-xs text-gray-400 font-serif mt-1">
+            Send each group its private link. Anyone with the link can view that group's photos and save them.
+          </p>
+        </div>
+        <button
+          onClick={load}
+          className="text-xs text-gray-500 hover:text-gray-800 transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {loading && <p className="text-sm text-gray-400 py-8 text-center">Loading…</p>}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && (
+        <div className="space-y-3">
+          {groups.map((g) => {
+            const link = linkFor(g.access_token);
+            return (
+              <div key={g.id} className="bg-white border border-gray-100 rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-serif text-base text-[#1a1a1a]">{g.display_name}</h3>
+                    <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                      {g.photo_count} photos
+                    </span>
+                    {g.id === 'all' && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#8b0000] text-white">
+                        master · admin only
+                      </span>
+                    )}
+                    {!g.can_download && g.id !== 'all' && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#fdfaf6] text-[#8b0000] border border-[#c5a059]/40">
+                        view-only · shown to every group
+                      </span>
+                    )}
+                  </div>
+                  {link ? (
+                    <code className="block mt-2 text-xs text-gray-500 break-all font-mono">{link}</code>
+                  ) : (
+                    <p className="mt-2 text-xs italic text-gray-400">
+                      This gallery has no direct link — it's automatically included with every group's share.
+                    </p>
+                  )}
+                </div>
+                {g.access_token && (
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => copy(g.access_token!)}
+                      className="text-xs font-medium px-3 py-2 rounded-lg bg-[#8b0000] text-white hover:bg-[#a00000] transition-colors"
+                    >
+                      {copied === g.access_token ? 'Copied!' : 'Copy link'}
+                    </button>
+                    <button
+                      onClick={() => regenerate(g.id)}
+                      disabled={busy === g.id}
+                      className="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-colors"
+                    >
+                      {busy === g.id ? '…' : 'Regenerate'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {groups.length === 0 && (
+            <p className="text-center text-gray-400 py-12 font-serif">No photo groups configured.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

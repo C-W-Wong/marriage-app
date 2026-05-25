@@ -8,6 +8,12 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - ALLOWED_ORIGIN=https://chris-eileen.com
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - SUPABASE_PHOTOS_BUCKET=${SUPABASE_PHOTOS_BUCKET:-wedding-photos}
     volumes:
       - db-data:/app/server/data
       - uploads:/app/server/uploads

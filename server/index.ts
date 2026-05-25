@@ -9,6 +9,16 @@ import { dirname, join, resolve } from 'path';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import pg from 'pg';
+import WebSocket from 'ws';
+import archiver from 'archiver';
+
+// Supabase-js initializes a realtime client even when we only use storage/db.
+// Node 20 has no global WebSocket; polyfill it so createClient doesn't throw.
+if (typeof (globalThis as any).WebSocket === 'undefined') {
+  (globalThis as any).WebSocket = WebSocket;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -131,7 +141,7 @@ app.use(helmet({
       imgSrc: ["'self'", "data:", "https:", "blob:"],
       frameSrc: ["'self'", "https://maps.google.com", "https://www.google.com", "https://maps.googleapis.com"],
       mediaSrc: ["'self'", "blob:"],
-      connectSrc: ["'self'", "data:", "https://calendar.google.com", "https://maps.apple.com", "https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+      connectSrc: ["'self'", "data:", "https://calendar.google.com", "https://maps.apple.com", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://*.supabase.co"],
     },
   },
   crossOriginEmbedderPolicy: false, // needed for Google Maps iframe
@@ -537,6 +547,669 @@ app.post('/api/photos', uploadLimiter, photoUpload.array('photos', 10), (req, re
   });
   const inserted = insertMany(validFiles);
   res.status(201).json(inserted);
+});
+
+// --- Wedding photo gallery (Supabase-backed) ---
+
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_DB_URL = process.env.SUPABASE_DB_URL || '';
+const PHOTOS_BUCKET = process.env.SUPABASE_PHOTOS_BUCKET || 'wedding-photos';
+const SIGNED_URL_TTL_SECONDS = 60 * 60 * 12; // 12h — enough for a browsing session
+
+let supabaseClient: SupabaseClient | null = null;
+let pgPool: pg.Pool | null = null;
+
+function galleryConfigured(): boolean {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_DB_URL);
+}
+
+function getSupabase(): SupabaseClient {
+  if (!supabaseClient) {
+    supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+    });
+  }
+  return supabaseClient;
+}
+
+function getPg(): pg.Pool {
+  if (!pgPool) {
+    pgPool = new pg.Pool({ connectionString: SUPABASE_DB_URL, ssl: { rejectUnauthorized: false }, max: 4 });
+  }
+  return pgPool;
+}
+
+function notConfigured(res: express.Response) {
+  res.status(503).json({ error: 'Photo gallery is not configured on this server yet.' });
+}
+
+const galleryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+type PhotoRow = {
+  id: string;
+  group_id: string;
+  storage_path: string;
+  thumbnail_path: string | null;
+  file_name: string;
+  width: number | null;
+  height: number | null;
+  sort_order: number;
+};
+
+type GroupRow = {
+  id: string;
+  display_name: string;
+  access_token: string | null;
+  can_download: boolean;
+  sort_order: number;
+};
+
+async function fetchGroupByToken(token: string): Promise<GroupRow | null> {
+  if (!token || typeof token !== 'string' || token.length > 128) return null;
+  const { rows } = await getPg().query<GroupRow>(
+    'select id, display_name, access_token, can_download, sort_order from photo_groups where access_token = $1',
+    [token]
+  );
+  return rows[0] ?? null;
+}
+
+async function fetchGroupPhotos(groupIds: string[]): Promise<PhotoRow[]> {
+  if (groupIds.length === 0) return [];
+  const { rows } = await getPg().query<PhotoRow>(
+    `select id, group_id, storage_path, thumbnail_path, file_name, width, height, sort_order
+       from photos where group_id = any($1::text[])
+       order by group_id, sort_order, id`,
+    [groupIds]
+  );
+  return rows;
+}
+
+async function signPaths(paths: string[]): Promise<Record<string, string>> {
+  if (paths.length === 0) return {};
+  const { data, error } = await getSupabase().storage
+    .from(PHOTOS_BUCKET)
+    .createSignedUrls(paths, SIGNED_URL_TTL_SECONDS);
+  if (error) throw error;
+  const out: Record<string, string> = {};
+  for (const row of data ?? []) {
+    if (row.path && row.signedUrl) out[row.path] = row.signedUrl;
+  }
+  return out;
+}
+
+type UploadRow = {
+  id: string;
+  storage_path: string;
+  thumbnail_path: string | null;
+  file_name: string;
+  media_type: 'image' | 'video';
+  mime_type: string | null;
+  file_size: number | null;
+  width: number | null;
+  height: number | null;
+  duration_seconds: number | null;
+  uploader_name: string | null;
+  created_at: string;
+};
+
+async function fetchGuestUploads(limit = 500): Promise<UploadRow[]> {
+  const { rows } = await getPg().query<UploadRow>(
+    `select id, storage_path, thumbnail_path, file_name, media_type, mime_type, file_size,
+            width, height, duration_seconds, uploader_name, created_at
+       from uploaded_media
+       order by created_at desc
+       limit $1`,
+    [limit]
+  );
+  return rows;
+}
+
+// Public: resolve a token and return everything the gallery page needs.
+// Response shape (used for both master 'all' link and per-group links):
+//   {
+//     group:           { id, display_name, can_download, is_master },
+//     categories:      [{ id, display_name }],   // chips for the photos tab
+//     default_category: string | null,           // the chip to pre-select
+//     photos:          [{ id, group_id, file_name, thumb_url, width, height, can_download }],
+//     guest_uploads:   [{ id, media_type, file_name, thumb_url, view_url, ... }]
+//   }
+app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) { res.status(404).json({ error: 'Invalid or expired link' }); return; }
+
+    const isMaster = group.id === 'all';
+
+    // Which underlying groups feed this view, and a "categories" list for chips.
+    let sourceGroupIds: string[];
+    let categories: { id: string; display_name: string }[];
+    let defaultCategory: string | null;
+    if (isMaster) {
+      const all = await getPg().query<{ id: string; display_name: string }>(
+        `select id, display_name from photo_groups
+         where id <> 'all'
+         order by case when id = 'couple' then -1 else sort_order end`
+      );
+      sourceGroupIds = all.rows.map((r) => r.id);
+      categories = all.rows;
+      defaultCategory = null; // show "All" by default
+    } else {
+      sourceGroupIds = ['couple', group.id];
+      const all = await getPg().query<{ id: string; display_name: string }>(
+        `select id, display_name from photo_groups
+         where id = any($1::text[])
+         order by case when id = 'couple' then 1 else 0 end`,
+        [sourceGroupIds]
+      );
+      categories = all.rows;
+      defaultCategory = group.id;
+    }
+
+    const photoRows = await fetchGroupPhotos(sourceGroupIds);
+    const uploads = await fetchGuestUploads();
+
+    const pathsToSign = new Set<string>();
+    for (const p of photoRows) pathsToSign.add(p.thumbnail_path || p.storage_path);
+    for (const u of uploads) {
+      if (u.thumbnail_path) pathsToSign.add(u.thumbnail_path);
+      else pathsToSign.add(u.storage_path);
+      if (u.media_type === 'video') pathsToSign.add(u.storage_path); // need playback url too
+    }
+    const signed = await signPaths(Array.from(pathsToSign));
+
+    const photos = photoRows.map((p) => {
+      const isCouple = p.group_id === 'couple';
+      // Master link makes every category downloadable; regular link follows
+      // the group's flag for its own photos and view-only for couple.
+      const canDownload = isMaster ? true : (isCouple ? false : group.can_download);
+      return {
+        id: p.id,
+        group_id: p.group_id,
+        file_name: p.file_name,
+        thumb_url: signed[p.thumbnail_path || p.storage_path] || null,
+        width: p.width,
+        height: p.height,
+        can_download: canDownload,
+      };
+    });
+
+    const guestUploads = uploads.map((u) => {
+      const thumbKey = u.thumbnail_path || u.storage_path;
+      return {
+        id: u.id,
+        media_type: u.media_type,
+        file_name: u.file_name,
+        mime_type: u.mime_type,
+        thumb_url: signed[thumbKey] || null,
+        view_url: u.media_type === 'video' ? signed[u.storage_path] || null : signed[thumbKey] || null,
+        width: u.width,
+        height: u.height,
+        duration_seconds: u.duration_seconds,
+        file_size: u.file_size,
+        uploader_name: u.uploader_name,
+        created_at: u.created_at,
+        // Guest uploads are always downloadable from any link.
+        can_download: true,
+      };
+    });
+
+    res.json({
+      group: {
+        id: group.id,
+        display_name: group.display_name,
+        can_download: group.can_download,
+        is_master: isMaster,
+      },
+      categories,
+      default_category: defaultCategory,
+      photos,
+      guest_uploads: guestUploads,
+    });
+  } catch (err) {
+    console.error('Gallery access error:', err);
+    res.status(500).json({ error: 'Failed to load gallery' });
+  }
+});
+
+// Resolve a request for downloadable items (photos from groups + guest uploads)
+// against the access token's permissions.  Returns the rows that the caller
+// is allowed to download.
+async function resolveDownloadable(
+  group: GroupRow,
+  photoIds: string[],
+  uploadIds: string[]
+): Promise<{ storage_path: string; file_name: string; id: string }[]> {
+  const out: { storage_path: string; file_name: string; id: string }[] = [];
+
+  if (photoIds.length > 0) {
+    // Master link downloads everything; regular links download only their own
+    // group's photos (couple stays view-only).
+    let rows: { id: string; storage_path: string; file_name: string }[];
+    if (group.id === 'all') {
+      const r = await getPg().query<{ id: string; storage_path: string; file_name: string }>(
+        `select id, storage_path, file_name from photos where id = any($1::uuid[])`,
+        [photoIds]
+      );
+      rows = r.rows;
+    } else {
+      if (!group.can_download) return [];
+      const r = await getPg().query<{ id: string; storage_path: string; file_name: string }>(
+        `select id, storage_path, file_name from photos
+          where group_id = $1 and id = any($2::uuid[])`,
+        [group.id, photoIds]
+      );
+      rows = r.rows;
+    }
+    out.push(...rows);
+  }
+
+  if (uploadIds.length > 0) {
+    // Guest uploads are always downloadable from any valid gallery link.
+    const r = await getPg().query<{ id: string; storage_path: string; file_name: string }>(
+      `select id, storage_path, file_name from uploaded_media where id = any($1::uuid[])`,
+      [uploadIds]
+    );
+    out.push(...r.rows);
+  }
+
+  return out;
+}
+
+function parseDownloadRequest(body: any): { photoIds: string[]; uploadIds: string[] } | { error: string } {
+  const photoIds = Array.isArray(body?.photoIds) ? body.photoIds : [];
+  const uploadIds = Array.isArray(body?.uploadIds) ? body.uploadIds : [];
+  if (photoIds.length + uploadIds.length === 0) return { error: 'Nothing to download' };
+  if (photoIds.length + uploadIds.length > 200) return { error: 'At most 200 items per request' };
+  const ok = (id: any) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id);
+  if (!photoIds.every(ok) || !uploadIds.every(ok)) return { error: 'Invalid ID format' };
+  return { photoIds, uploadIds };
+}
+
+// Public: produce signed download URLs for the items the caller is allowed to grab.
+app.post('/api/gallery-access/:token/download', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) { res.status(404).json({ error: 'Invalid or expired link' }); return; }
+
+    const parsed = parseDownloadRequest(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+
+    const rows = await resolveDownloadable(group, parsed.photoIds, parsed.uploadIds);
+    if (rows.length === 0) { res.status(403).json({ error: 'No downloadable items' }); return; }
+
+    const signed = await Promise.all(
+      rows.map(async (row) => {
+        const { data, error } = await getSupabase().storage
+          .from(PHOTOS_BUCKET)
+          .createSignedUrl(row.storage_path, 60 * 10, { download: row.file_name });
+        if (error) throw error;
+        return { id: row.id, file_name: row.file_name, url: data.signedUrl };
+      })
+    );
+
+    res.json({ photos: signed });
+  } catch (err) {
+    console.error('Download URL error:', err);
+    res.status(500).json({ error: 'Failed to generate download URLs' });
+  }
+});
+
+// --- Zip bundle (multi-select download) ---
+//
+// Two-step flow so the actual download is a top-level GET (works on every browser):
+//   1. POST .../zip-prepare  { photoIds } -> { session_id }
+//   2. GET  .../zip?s=<id>                 -> streams a .zip with originals
+
+type ZipSession = {
+  token: string;
+  photoIds: string[];
+  uploadIds: string[];
+  expires: number;
+};
+const zipSessions = new Map<string, ZipSession>();
+const ZIP_SESSION_TTL_MS = 60 * 1000; // 60s window from prepare to download
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of zipSessions) if (v.expires < now) zipSessions.delete(k);
+}, 30_000).unref();
+
+app.post('/api/gallery-access/:token/zip-prepare', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) { res.status(404).json({ error: 'Invalid or expired link' }); return; }
+
+    const parsed = parseDownloadRequest(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    zipSessions.set(sessionId, {
+      token: req.params.token,
+      photoIds: parsed.photoIds,
+      uploadIds: parsed.uploadIds,
+      expires: Date.now() + ZIP_SESSION_TTL_MS,
+    });
+    res.json({ session_id: sessionId });
+  } catch (err) {
+    console.error('Zip prepare error:', err);
+    res.status(500).json({ error: 'Failed to prepare download' });
+  }
+});
+
+app.get('/api/gallery-access/:token/zip', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  const sessionId = String(req.query.s || '');
+  const session = zipSessions.get(sessionId);
+  if (!session || session.token !== req.params.token || session.expires < Date.now()) {
+    res.status(404).type('text/plain').send('Download link expired. Please reselect and try again.');
+    return;
+  }
+  zipSessions.delete(sessionId); // one-shot
+
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) {
+      res.status(403).type('text/plain').send('Forbidden');
+      return;
+    }
+
+    const rows = await resolveDownloadable(group, session.photoIds, session.uploadIds);
+    if (rows.length === 0) { res.status(403).type('text/plain').send('No downloadable items'); return; }
+
+    const safeGroup = group.id.replace(/[^a-z0-9_-]/gi, '_');
+    const zipName = `wedding-photos-${safeGroup}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    const archive = archiver('zip', { store: true }); // photos are already compressed
+    archive.on('warning', (err) => { if (err.code !== 'ENOENT') console.error('zip warning', err); });
+    archive.on('error', (err) => {
+      console.error('zip error:', err);
+      try { res.destroy(err); } catch {}
+    });
+    archive.pipe(res);
+
+    // Disambiguate duplicate file names within the zip.
+    const used = new Set<string>();
+    const uniqueName = (name: string) => {
+      if (!used.has(name)) { used.add(name); return name; }
+      const dot = name.lastIndexOf('.');
+      const base = dot === -1 ? name : name.slice(0, dot);
+      const ext = dot === -1 ? '' : name.slice(dot);
+      let i = 2;
+      while (used.has(`${base} (${i})${ext}`)) i++;
+      const n = `${base} (${i})${ext}`;
+      used.add(n);
+      return n;
+    };
+
+    for (const row of rows) {
+      const { data, error } = await getSupabase().storage
+        .from(PHOTOS_BUCKET)
+        .createSignedUrl(row.storage_path, 60 * 5);
+      if (error || !data) {
+        console.error('signed url failed:', error);
+        continue;
+      }
+      const resp = await fetch(data.signedUrl);
+      if (!resp.ok || !resp.body) {
+        console.error('fetch failed:', resp.status, row.storage_path);
+        continue;
+      }
+      // Convert web ReadableStream → Node Readable so archiver can consume it.
+      const { Readable } = await import('stream');
+      const nodeStream = Readable.fromWeb(resp.body as any);
+      archive.append(nodeStream, { name: uniqueName(row.file_name) });
+      // Wait for this entry to finish streaming before starting the next one,
+      // so we don't open all signed-URL fetches in parallel for large batches.
+      await new Promise<void>((resolve, reject) => {
+        nodeStream.on('end', resolve);
+        nodeStream.on('error', reject);
+      });
+    }
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('Zip stream error:', err);
+    // Headers may already have been sent, so don't try to send JSON.
+    try { res.end(); } catch {}
+  }
+});
+
+// --- Guest uploads (photos + videos) ---
+//
+// Two-step flow that lets the browser PUT the file straight to Supabase
+// Storage (no double-bandwidth through this server):
+//   1. POST .../upload-init     { fileName, fileSize, mimeType, mediaType, uploaderName }
+//                               -> { upload_id, signed_url, supabase_path }
+//   2. PUT  <signed_url>        (raw file body, content-type set by client)
+//   3. POST .../upload-complete { upload_id, width?, height?, duration_seconds? }
+//                               -> { media: { ... } }
+
+type PendingUpload = {
+  token: string;
+  storage_path: string;
+  file_name: string;
+  media_type: 'image' | 'video';
+  mime_type: string;
+  file_size: number;
+  uploader_name: string | null;
+  via_group: string;
+  expires: number;
+};
+const pendingUploads = new Map<string, PendingUpload>();
+const UPLOAD_SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes to finish a single upload
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of pendingUploads) if (v.expires < now) pendingUploads.delete(k);
+}, 60_000).unref();
+
+const UPLOAD_MAX_BYTES = 500 * 1024 * 1024; // matches the bucket cap the user set
+const ALLOWED_IMG_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif']);
+const ALLOWED_VIDEO_MIME = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/3gpp']);
+
+function safeExt(name: string): string {
+  const m = name.toLowerCase().match(/\.([a-z0-9]{1,5})$/);
+  return m ? m[1] : 'bin';
+}
+
+const uploadLimiterGuest = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Too many uploads, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.post('/api/gallery-access/:token/upload-init', uploadLimiterGuest, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) { res.status(404).json({ error: 'Invalid or expired link' }); return; }
+
+    const { fileName, fileSize, mimeType, mediaType, uploaderName } = req.body as {
+      fileName?: string; fileSize?: number; mimeType?: string;
+      mediaType?: 'image' | 'video'; uploaderName?: string;
+    };
+    if (!fileName || typeof fileName !== 'string' || fileName.length > 200) {
+      res.status(400).json({ error: 'fileName is required (max 200 chars)' }); return;
+    }
+    if (typeof fileSize !== 'number' || fileSize <= 0 || fileSize > UPLOAD_MAX_BYTES) {
+      res.status(400).json({ error: `fileSize must be 1..${UPLOAD_MAX_BYTES} bytes` }); return;
+    }
+    if (mediaType !== 'image' && mediaType !== 'video') {
+      res.status(400).json({ error: 'mediaType must be "image" or "video"' }); return;
+    }
+    if (typeof mimeType !== 'string') {
+      res.status(400).json({ error: 'mimeType is required' }); return;
+    }
+    const allowed = mediaType === 'image' ? ALLOWED_IMG_MIME : ALLOWED_VIDEO_MIME;
+    if (!allowed.has(mimeType.toLowerCase())) {
+      res.status(400).json({ error: `Unsupported ${mediaType} format` }); return;
+    }
+    if (uploaderName !== undefined && (typeof uploaderName !== 'string' || uploaderName.length > 80)) {
+      res.status(400).json({ error: 'uploaderName must be a string up to 80 chars' }); return;
+    }
+
+    const ext = safeExt(fileName);
+    const uploadId = crypto.randomUUID();
+    const objectId = crypto.randomUUID();
+    const storage_path = `guest-uploads/${objectId}.${ext}`;
+
+    const { data, error } = await getSupabase().storage
+      .from(PHOTOS_BUCKET)
+      .createSignedUploadUrl(storage_path);
+    if (error || !data) {
+      console.error('createSignedUploadUrl failed:', error);
+      res.status(500).json({ error: 'Failed to create upload URL' }); return;
+    }
+
+    pendingUploads.set(uploadId, {
+      token: req.params.token,
+      storage_path,
+      file_name: fileName,
+      media_type: mediaType,
+      mime_type: mimeType,
+      file_size: fileSize,
+      uploader_name: uploaderName?.trim() || null,
+      via_group: group.id,
+      expires: Date.now() + UPLOAD_SESSION_TTL_MS,
+    });
+
+    res.json({
+      upload_id: uploadId,
+      signed_url: data.signedUrl,
+      supabase_path: storage_path,
+    });
+  } catch (err) {
+    console.error('upload-init error:', err);
+    res.status(500).json({ error: 'Failed to initialize upload' });
+  }
+});
+
+app.post('/api/gallery-access/:token/upload-complete', uploadLimiterGuest, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const { upload_id, width, height, duration_seconds } = req.body as {
+      upload_id?: string; width?: number; height?: number; duration_seconds?: number;
+    };
+    if (!upload_id || typeof upload_id !== 'string') {
+      res.status(400).json({ error: 'upload_id is required' }); return;
+    }
+    const pending = pendingUploads.get(upload_id);
+    if (!pending || pending.token !== req.params.token || pending.expires < Date.now()) {
+      res.status(404).json({ error: 'Upload session not found or expired' }); return;
+    }
+
+    // Verify the object actually landed in storage before we record it.
+    const dir = pending.storage_path.slice(0, pending.storage_path.lastIndexOf('/'));
+    const fileName = pending.storage_path.slice(pending.storage_path.lastIndexOf('/') + 1);
+    const { data: list, error: listErr } = await getSupabase().storage
+      .from(PHOTOS_BUCKET)
+      .list(dir, { search: fileName, limit: 1 });
+    if (listErr) {
+      console.error('list after upload failed:', listErr);
+      res.status(500).json({ error: 'Failed to verify upload' }); return;
+    }
+    if (!list || list.length === 0 || list[0].name !== fileName) {
+      res.status(400).json({ error: 'File was not received. Please retry.' }); return;
+    }
+
+    pendingUploads.delete(upload_id);
+
+    const w = typeof width === 'number' && width > 0 ? Math.round(width) : null;
+    const h = typeof height === 'number' && height > 0 ? Math.round(height) : null;
+    const dur = typeof duration_seconds === 'number' && duration_seconds > 0 ? duration_seconds : null;
+
+    const { rows } = await getPg().query<{ id: string; created_at: string }>(
+      `insert into uploaded_media
+         (storage_path, file_name, media_type, mime_type, file_size,
+          width, height, duration_seconds, uploader_name, uploaded_via)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       returning id, created_at`,
+      [pending.storage_path, pending.file_name, pending.media_type, pending.mime_type, pending.file_size,
+       w, h, dur, pending.uploader_name, pending.via_group]
+    );
+
+    const created = rows[0];
+    const { data: signed } = await getSupabase().storage
+      .from(PHOTOS_BUCKET)
+      .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS);
+
+    res.status(201).json({
+      media: {
+        id: created.id,
+        media_type: pending.media_type,
+        file_name: pending.file_name,
+        mime_type: pending.mime_type,
+        file_size: pending.file_size,
+        width: w,
+        height: h,
+        duration_seconds: dur,
+        uploader_name: pending.uploader_name,
+        created_at: created.created_at,
+        thumb_url: signed?.signedUrl ?? null,
+        view_url: signed?.signedUrl ?? null,
+        can_download: true,
+      },
+    });
+  } catch (err) {
+    console.error('upload-complete error:', err);
+    res.status(500).json({ error: 'Failed to finalize upload' });
+  }
+});
+
+// Admin: list groups with their share links.
+app.get('/api/admin/photo-groups', adminAuth, async (_req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const { rows } = await getPg().query<GroupRow & { photo_count: string }>(
+      `select g.id, g.display_name, g.access_token, g.can_download, g.sort_order,
+              coalesce((select count(*) from photos p where p.group_id = g.id), 0)::text as photo_count
+         from photo_groups g
+         order by g.sort_order`
+    );
+    res.json(rows.map((r) => ({
+      id: r.id,
+      display_name: r.display_name,
+      access_token: r.access_token,
+      can_download: r.can_download,
+      photo_count: Number(r.photo_count),
+    })));
+  } catch (err) {
+    console.error('List groups error:', err);
+    res.status(500).json({ error: 'Failed to list groups' });
+  }
+});
+
+// Admin: regenerate a group's access token (invalidates the old share link).
+app.post('/api/admin/photo-groups/:id/regenerate-token', adminAuth, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const id = req.params.id;
+    if (!/^[a-z0-9-]{1,50}$/.test(id)) { res.status(400).json({ error: 'Invalid group id' }); return; }
+    const newToken = crypto.randomBytes(16).toString('hex');
+    const { rows } = await getPg().query(
+      `update photo_groups set access_token = $1 where id = $2 and access_token is not null
+       returning id, access_token`,
+      [newToken, id]
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Group not found or not regeneratable' }); return; }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Regenerate token error:', err);
+    res.status(500).json({ error: 'Failed to regenerate token' });
+  }
 });
 
 // --- Weather Forecast ---
