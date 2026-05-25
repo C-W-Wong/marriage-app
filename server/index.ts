@@ -750,22 +750,32 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
     // For guest-uploaded IMAGES we ask Supabase to deliver a resized version
     // (width 600px, quality 70) via the image-transform signed-URL endpoint
     // so the grid serves ~50–150 KB WebPs instead of 5–25 MB originals.
-    // The transform endpoint is per-call, so parallel them with Promise.all.
+    // The transform endpoint is per-call, so parallel them — but wrap each
+    // call in a try/catch so a single throw doesn't 500 the whole gallery
+    // (we fall back to the full-size signed URL for that one image).
     const imageUploadThumbs = await Promise.all(
       uploads.filter((u) => u.media_type === 'image').map(async (u) => {
-        const { data, error } = await getSupabase().storage
-          .from(PHOTOS_BUCKET)
-          .createSignedUrl(u.storage_path, SIGNED_URL_TTL_SECONDS, {
-            transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
-          });
-        if (error || !data) return [u.id, null] as const;
-        return [u.id, data.signedUrl] as const;
+        try {
+          const { data, error } = await getSupabase().storage
+            .from(PHOTOS_BUCKET)
+            .createSignedUrl(u.storage_path, SIGNED_URL_TTL_SECONDS, {
+              transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
+            });
+          if (error || !data) {
+            console.warn('transform signing returned error for', u.storage_path, error?.message);
+            return [u.id, null] as const;
+          }
+          return [u.id, data.signedUrl] as const;
+        } catch (err) {
+          console.warn('transform signing threw for', u.storage_path, (err as Error).message);
+          return [u.id, null] as const;
+        }
       })
     );
     const transformThumbByUploadId = new Map(imageUploadThumbs);
 
     const guestUploads = uploads.map((u) => {
-      const transformThumb = transformThumbByUploadId.get(u.id);
+      const transformThumb = u.media_type === 'image' ? transformThumbByUploadId.get(u.id) : null;
       return {
         id: u.id,
         media_type: u.media_type,
@@ -990,7 +1000,19 @@ app.get('/api/gallery-access/:token/zip', galleryLimiter, async (req, res) => {
         console.error('signed url failed:', error);
         continue;
       }
-      const resp = await fetch(data.signedUrl);
+      // 60s timeout per file so one stalled Supabase fetch can't hang the
+      // entire zip stream after we've already committed Content-Disposition.
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), 60_000);
+      let resp: Response;
+      try {
+        resp = await fetch(data.signedUrl, { signal: controller.signal });
+      } catch (err) {
+        clearTimeout(abortTimer);
+        console.error('fetch failed (timeout/abort):', (err as Error).message, row.storage_path);
+        continue;
+      }
+      clearTimeout(abortTimer);
       if (!resp.ok || !resp.body) {
         console.error('fetch failed:', resp.status, row.storage_path);
         continue;
@@ -998,13 +1020,21 @@ app.get('/api/gallery-access/:token/zip', galleryLimiter, async (req, res) => {
       // Convert web ReadableStream → Node Readable so archiver can consume it.
       const { Readable } = await import('stream');
       const nodeStream = Readable.fromWeb(resp.body as any);
-      archive.append(nodeStream, { name: uniqueName(row.file_name) });
-      // Wait for this entry to finish streaming before starting the next one,
-      // so we don't open all signed-URL fetches in parallel for large batches.
-      await new Promise<void>((resolve, reject) => {
+      // Attach listeners BEFORE archive.append so a synchronous 'end' or
+      // 'error' on a small / fast stream can't be missed.
+      const entryDone = new Promise<void>((resolve, reject) => {
         nodeStream.on('end', resolve);
         nodeStream.on('error', reject);
       });
+      archive.append(nodeStream, { name: uniqueName(row.file_name) });
+      // Wait for this entry to finish streaming before starting the next one,
+      // so we don't open all signed-URL fetches in parallel for large batches.
+      try {
+        await entryDone;
+      } catch (err) {
+        console.error('zip entry stream error:', (err as Error).message);
+        // Stream errored mid-flight; carry on with the rest of the batch.
+      }
     }
 
     await archive.finalize();
@@ -1158,12 +1188,41 @@ app.post('/api/gallery-access/:token/upload-complete', uploadLimiterGuest, async
       res.status(400).json({ error: 'File was not received. Please retry.' }); return;
     }
 
-    pendingUploads.delete(upload_id);
-
     const w = typeof width === 'number' && width > 0 ? Math.round(width) : null;
     const h = typeof height === 'number' && height > 0 ? Math.round(height) : null;
     const dur = typeof duration_seconds === 'number' && duration_seconds > 0 ? duration_seconds : null;
 
+    // Sign URLs BEFORE we commit / delete the pending session. If signing
+    // throws we want the retry to find pendingUploads still populated and
+    // succeed; otherwise the client gets a fake "session expired" on what
+    // is actually a transient infra hiccup.
+    const { data: full, error: fullErr } = await getSupabase().storage
+      .from(PHOTOS_BUCKET)
+      .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS);
+    if (fullErr || !full?.signedUrl) {
+      console.error('createSignedUrl(full) failed:', fullErr);
+      res.status(500).json({ error: 'Failed to sign media URL' }); return;
+    }
+
+    // Best-effort transform thumbnail. If this throws / returns error we
+    // gracefully fall back to the full-size URL (still a valid thumbnail).
+    let thumb: string = full.signedUrl;
+    if (pending.media_type === 'image') {
+      try {
+        const { data: t, error: tErr } = await getSupabase().storage
+          .from(PHOTOS_BUCKET)
+          .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS, {
+            transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
+          });
+        if (tErr) console.warn('createSignedUrl(transform) error:', tErr.message);
+        if (t?.signedUrl) thumb = t.signedUrl;
+      } catch (err) {
+        console.warn('createSignedUrl(transform) threw:', (err as Error).message);
+      }
+    }
+
+    // Now commit. If the DB insert fails the pending session stays and the
+    // client can retry without orphaning the storage object.
     const { rows } = await getPg().query<{ id: string; created_at: string }>(
       `insert into uploaded_media
          (storage_path, file_name, media_type, mime_type, file_size,
@@ -1173,23 +1232,8 @@ app.post('/api/gallery-access/:token/upload-complete', uploadLimiterGuest, async
       [pending.storage_path, pending.file_name, pending.media_type, pending.mime_type, pending.file_size,
        w, h, dur, pending.uploader_name, pending.via_group]
     );
-
     const created = rows[0];
-    const { data: full } = await getSupabase().storage
-      .from(PHOTOS_BUCKET)
-      .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS);
-
-    // Generate a small WebP thumbnail URL for images so the gallery doesn't
-    // have to download the multi-MB original just to render a 200px tile.
-    let thumb = full?.signedUrl ?? null;
-    if (pending.media_type === 'image') {
-      const { data: t } = await getSupabase().storage
-        .from(PHOTOS_BUCKET)
-        .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS, {
-          transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
-        });
-      if (t?.signedUrl) thumb = t.signedUrl;
-    }
+    pendingUploads.delete(upload_id);
 
     res.status(201).json({
       media: {

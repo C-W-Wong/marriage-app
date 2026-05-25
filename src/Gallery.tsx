@@ -115,6 +115,10 @@ export default function Gallery() {
   const canLoadMore = visible.length < currentList.length;
 
   const sentinelRef = useRef<HTMLDivElement>(null);
+  // Keep the observer stable across list-length changes (which fire on every
+  // streamed upload completion). It only needs to re-attach when canLoadMore
+  // flips false->true (paging hits the end and then a new batch arrives) or
+  // when the user switches tabs (different sentinel mount).
   useEffect(() => {
     if (!canLoadMore) return;
     const el = sentinelRef.current;
@@ -129,7 +133,7 @@ export default function Gallery() {
     }, { rootMargin: '600px 0px' });
     ob.observe(el);
     return () => ob.disconnect();
-  }, [canLoadMore, currentList.length, tab]);
+  }, [canLoadMore, tab]);
 
   const downloadIds = useCallback(async (
     photoIds: string[],
@@ -206,10 +210,11 @@ export default function Gallery() {
         return;
       }
 
-      // Multi-item: server-side zip → top-level navigation. Response is
-      // Content-Disposition: attachment so the browser treats it as a
-      // download, not a navigation, and we stay on the page. window.location
-      // is more reliable on mobile Safari than a programmatic anchor click.
+      // Multi-item: server-side zip → load into a hidden iframe. Response is
+      // Content-Disposition: attachment so the browser pulls it into Downloads
+      // instead of replacing the SPA. Using an iframe (vs window.location.href)
+      // means an error response (404 session-expired, 500, etc.) gets confined
+      // to the iframe and the gallery / selections / music keep running.
       const prep = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/zip-prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -221,11 +226,14 @@ export default function Gallery() {
       }
       const { session_id } = await prep.json() as { session_id: string };
       const zipUrl = `/api/gallery-access/${encodeURIComponent(token)}/zip?s=${encodeURIComponent(session_id)}`;
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = zipUrl;
+      document.body.appendChild(iframe);
+      // The iframe can be removed once the browser has consumed the response.
+      setTimeout(() => { try { document.body.removeChild(iframe); } catch {} }, 60_000);
       showToast(`Preparing ${totalItems} items as a zip — check your downloads in a moment.`);
       maybeClear();
-      // Top-level nav. The server responds with Content-Disposition: attachment
-      // so the browser intercepts before navigating away.
-      window.location.href = zipUrl;
     } catch (err) {
       console.error(err);
       showToast(`Download failed: ${(err as Error).message}`);
@@ -253,21 +261,17 @@ export default function Gallery() {
       return next;
     });
   }, []);
+  // "Select all visible" REPLACES the current selection with exactly the
+  // visible/downloadable items on the active tab — matches the button's
+  // label semantics and lets users scope per-tab without leaking selections
+  // from previously-viewed categories.
   const selectAllVisible = useCallback(() => {
     if (tab === 'uploads') {
       const ids = (visible as Upload[]).filter((u) => u.can_download).map((u) => u.id);
-      setSelectedUploads((prev) => {
-        const next = new Set(prev);
-        for (const id of ids) next.add(id);
-        return next;
-      });
+      setSelectedUploads(new Set(ids));
     } else {
       const ids = (visible as Photo[]).filter((p) => p.can_download).map((p) => p.id);
-      setSelectedPhotos((prev) => {
-        const next = new Set(prev);
-        for (const id of ids) next.add(id);
-        return next;
-      });
+      setSelectedPhotos(new Set(ids));
     }
   }, [tab, visible]);
   const totalSelected = selectedPhotos.size + selectedUploads.size;
@@ -789,6 +793,22 @@ function ShareTab({
   const completedSinceFlushRef = useRef(0);
   const busy = queue.some((it) => it.status === 'uploading');
 
+  // Batch onUploaded calls — a burst of parallel completions becomes ONE
+  // parent setData/setLightbox update instead of N. Pending uploads are
+  // flushed on the next microtask.
+  const onUploadedBufferRef = useRef<Upload[]>([]);
+  const onUploadedScheduledRef = useRef(false);
+  const scheduleOnUploadedFlush = useCallback(() => {
+    if (onUploadedScheduledRef.current) return;
+    onUploadedScheduledRef.current = true;
+    queueMicrotask(() => {
+      const batch = onUploadedBufferRef.current;
+      onUploadedBufferRef.current = [];
+      onUploadedScheduledRef.current = false;
+      if (batch.length > 0) onUploaded(batch);
+    });
+  }, [onUploaded]);
+
   useEffect(() => {
     if (name) safeWriteStored('guest_upload_name', name);
     else safeRemoveStored('guest_upload_name');
@@ -821,9 +841,23 @@ function ShareTab({
     setQueue((q) => q.filter((it) => it.id !== id));
   }, []);
 
-  const clearCompleted = useCallback(() => {
-    setQueue((q) => q.filter((it) => it.status !== 'done'));
+  // Prune cancelledIds against the current queue so it doesn't grow forever
+  // across long sessions of add/remove. Any id no longer in queue is safe to
+  // forget — there's no worker that will look it up.
+  const pruneCancelledIds = useCallback((q: QueueItem[]) => {
+    const live = new Set(q.map((it) => it.id));
+    for (const id of cancelledIds.current) {
+      if (!live.has(id)) cancelledIds.current.delete(id);
+    }
   }, []);
+
+  const clearCompleted = useCallback(() => {
+    setQueue((q) => {
+      const next = q.filter((it) => it.status !== 'done');
+      pruneCancelledIds(next);
+      return next;
+    });
+  }, [pruneCancelledIds]);
 
   const uploadOne = useCallback(async (item: QueueItem): Promise<Upload | null> => {
     const setItem = (patch: Partial<QueueItem>) =>
@@ -872,27 +906,49 @@ function ShareTab({
       return null;
     }
 
+    // Track the in-flight XHR so withRetry can abort it before spawning a
+    // replacement (otherwise both PUT to the same x-upsert path in parallel).
+    let activeXhr: XMLHttpRequest | null = null;
+    // Track the high-water mark of progress across retries so the bar can't
+    // snap backwards on the user when a retry resets to 0.
+    let progressHighWater = 0.02;
     try {
       await withRetry(async () => {
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
+          activeXhr = xhr;
           xhr.open('PUT', init.signed_url);
           xhr.setRequestHeader('Content-Type', item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'));
           xhr.setRequestHeader('x-upsert', 'true');
+          // Cap total time per attempt at 5 min so iOS-killed XHRs (no
+          // onload/onerror) eventually reject and let withRetry restart.
+          xhr.timeout = 5 * 60 * 1000;
           xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) setItem({ progress: 0.02 + 0.93 * (e.loaded / e.total) });
+            if (e.lengthComputable) {
+              const p = 0.02 + 0.93 * (e.loaded / e.total);
+              if (p > progressHighWater) progressHighWater = p;
+              setItem({ progress: progressHighWater });
+            }
           };
           xhr.onload = () => {
+            activeXhr = null;
             if (xhr.status >= 200 && xhr.status < 300) resolve();
             else reject(new Error(`Upload failed (${xhr.status})`));
           };
-          xhr.onerror = () => reject(new Error('Network error during upload'));
+          xhr.onerror = () => { activeXhr = null; reject(new Error('Network error during upload')); };
+          xhr.ontimeout = () => { activeXhr = null; reject(new Error('Upload timed out')); };
+          xhr.onabort = () => { activeXhr = null; reject(new Error('Upload aborted')); };
           xhr.send(item.file);
         });
       }, (attempt) => {
-        if (attempt > 1) setItem({ progress: 0.02, message: `Retrying upload (${attempt}/${UPLOAD_MAX_RETRIES})…` });
+        if (attempt > 1) {
+          // Abort the stale XHR (if any) before withRetry spawns a new one.
+          if (activeXhr) { try { activeXhr.abort(); } catch {} activeXhr = null; }
+          setItem({ progress: progressHighWater, message: `Retrying upload (${attempt}/${UPLOAD_MAX_RETRIES})…` });
+        }
       });
     } catch (err) {
+      if (activeXhr) { try { activeXhr.abort(); } catch {} }
       setItem({ status: 'error', message: (err as Error).message });
       return null;
     }
@@ -911,6 +967,8 @@ function ShareTab({
         }
         const j = await compRes.json() as { media: Upload };
         return j.media;
+      }, (attempt) => {
+        if (attempt > 1) setItem({ message: `Saving — retrying (${attempt}/${UPLOAD_MAX_RETRIES})…` });
       });
       setItem({ status: 'done', progress: 1, message: undefined });
       return media;
@@ -921,17 +979,23 @@ function ShareTab({
   }, [token, name]);
 
   // Atomically claim the next 'queued' item and flip it to 'uploading' in
-  // both the synchronous ref-mirror and the React state. JS is single-
-  // threaded, so two workers calling this never grab the same item.
+  // both the synchronous ref-mirror (replaced with a fresh array — never
+  // mutated in place, because queueRef shares its reference with the React
+  // state) and the React state. JS is single-threaded, so two workers
+  // calling this never grab the same item.
   const claimNext = useCallback((): QueueItem | null => {
     const q = queueRef.current;
     for (let i = 0; i < q.length; i++) {
       const it = q[i];
       if (it.status === 'queued' && !cancelledIds.current.has(it.id)) {
-        const claimed = { ...it, status: 'uploading' as const, progress: 0.01 };
-        q[i] = claimed;
+        const claimed: QueueItem = { ...it, status: 'uploading', progress: 0.01 };
+        // Replace queueRef with a new array so we don't mutate the shared
+        // state value React is holding.
+        const nextArr = q.slice();
+        nextArr[i] = claimed;
+        queueRef.current = nextArr;
         setQueue((curr) => curr.map((x) => (x.id === claimed.id ? claimed : x)));
-        return it;
+        return claimed;
       }
     }
     return null;
@@ -956,7 +1020,8 @@ function ShareTab({
         if (!item) return;
         const result = await uploadOne(item);
         if (result) {
-          onUploaded([result]);
+          onUploadedBufferRef.current.push(result);
+          scheduleOnUploadedFlush();
           completedSinceFlushRef.current++;
         }
       }
@@ -964,7 +1029,7 @@ function ShareTab({
       workersActiveRef.current--;
       if (workersActiveRef.current === 0) flushCompletionToast();
     }
-  }, [claimNext, uploadOne, onUploaded, flushCompletionToast]);
+  }, [claimNext, uploadOne, scheduleOnUploadedFlush, flushCompletionToast]);
 
   const pumpQueue = useCallback(() => {
     while (workersActiveRef.current < UPLOAD_CONCURRENCY) {
@@ -980,9 +1045,17 @@ function ShareTab({
   // are running up to the concurrency cap.
   useEffect(() => { pumpQueue(); }, [queue, pumpQueue]);
 
+  // An item is worth retrying only if its failure was network/transient or
+  // an explicit 'Retrying…' state. Client-side rejections (unsupported type,
+  // size over cap, missing/invalid metadata) will fail the same way again.
+  const isRetryableItem = (msg: string | undefined): boolean => {
+    if (!msg) return true;
+    return isTransientError(new Error(msg)) || /Upload (timed out|aborted)/i.test(msg);
+  };
+
   const retryFailed = useCallback(() => {
     setQueue((q) => q.map((it) =>
-      it.status === 'error' && it.message !== 'Unsupported file type' && it.message !== 'File exceeds 500 MB limit'
+      it.status === 'error' && isRetryableItem(it.message)
         ? { ...it, status: 'queued', progress: 0, message: undefined }
         : it
     ));
@@ -991,6 +1064,7 @@ function ShareTab({
 
   const queuedCount = queue.filter((it) => it.status === 'queued').length;
   const errorCount = queue.filter((it) => it.status === 'error').length;
+  const retryableErrorCount = queue.filter((it) => it.status === 'error' && isRetryableItem(it.message)).length;
   const doneCount = queue.filter((it) => it.status === 'done').length;
 
   const resetDrag = useCallback(() => {
@@ -1126,12 +1200,12 @@ function ShareTab({
                     Clear uploaded
                   </button>
                 )}
-                {errorCount > 0 && !busy && (
+                {retryableErrorCount > 0 && !busy && (
                   <button
                     onClick={retryFailed}
                     className="inline-flex items-center gap-1.5 text-xs font-serif text-amber-700 hover:text-amber-900 border border-amber-300 hover:border-amber-500 px-3 py-2 rounded-full transition-colors"
                   >
-                    <AlertTriangle className="w-3.5 h-3.5" /> Retry {errorCount} failed
+                    <AlertTriangle className="w-3.5 h-3.5" /> Retry {retryableErrorCount} failed
                   </button>
                 )}
               </div>
@@ -1458,7 +1532,10 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onSave, downloading }
       onTouchCancel={() => { touchStartX.current = null; }}
     >
       <motion.div
-        key={`lb-${index}`}
+        // Key by the underlying item id, not its array index. When uploads
+        // stream in and shift indices, the user-visible item is the same
+        // so the motion.div should NOT remount/re-animate.
+        key={`lb-${item.id}`}
         initial={{ opacity: 0, scale: 0.985 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.18 }}
