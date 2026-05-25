@@ -158,36 +158,34 @@ export default function Gallery() {
         return;
       }
 
-      // Web Share API (mobile) for small batches: lands directly in Photos / Gallery.
-      const canShare =
-        totalItems <= 10 &&
-        typeof navigator !== 'undefined' &&
-        typeof navigator.canShare === 'function' &&
-        typeof navigator.share === 'function';
-      if (canShare) {
-        try {
-          const files: File[] = [];
-          for (const p of photos) {
+      // Single item: try Web Share (best mobile UX → Save to Photos), fall
+      // through to a blob download. For ANY multi-select we go straight to the
+      // server-side zip — Web Share with many large files is unreliable on
+      // iOS Safari and fails silently for some users.
+      if (totalItems === 1) {
+        const p = photos[0];
+        const canShare =
+          typeof navigator !== 'undefined' &&
+          typeof navigator.canShare === 'function' &&
+          typeof navigator.share === 'function';
+        if (canShare) {
+          try {
             const r = await fetch(p.url);
             if (!r.ok) throw new Error(`fetch ${r.status}`);
             const blob = await r.blob();
-            files.push(new File([blob], p.file_name, { type: blob.type || 'application/octet-stream' }));
+            const file = new File([blob], p.file_name, { type: blob.type || 'application/octet-stream' });
+            if (navigator.canShare!({ files: [file] })) {
+              await navigator.share({ files: [file] });
+              showToast('Saved.');
+              maybeClear();
+              return;
+            }
+          } catch (err) {
+            if ((err as Error).name === 'AbortError') { maybeClear(); return; }
+            // fall through to direct download
           }
-          if (navigator.canShare!({ files })) {
-            await navigator.share({ files });
-            showToast(totalItems === 1 ? 'Saved.' : `${totalItems} items shared — pick "Save to Photos".`);
-            maybeClear();
-            return;
-          }
-        } catch (err) {
-          if ((err as Error).name === 'AbortError') { maybeClear(); return; }
-          // Non-abort error in share path: don't silently fall through into another download.
-          throw err;
         }
-      }
 
-      if (totalItems === 1) {
-        const p = photos[0];
         let downloaded = false;
         try {
           const r = await fetch(p.url);
@@ -198,10 +196,8 @@ export default function Gallery() {
           a.href = objectUrl; a.download = p.file_name;
           document.body.appendChild(a); a.click(); document.body.removeChild(a);
           downloaded = true;
-          // Give the browser plenty of time to read the blob before revoking.
           setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
         } catch {
-          // Fallback: open the signed URL in a new tab so we don't unload the SPA.
           const fallback = window.open(p.url, '_blank', 'noopener,noreferrer');
           if (fallback) downloaded = true;
         }
@@ -210,7 +206,10 @@ export default function Gallery() {
         return;
       }
 
-      // Multi-item: server-side zip, single download.
+      // Multi-item: server-side zip → top-level navigation. Response is
+      // Content-Disposition: attachment so the browser treats it as a
+      // download, not a navigation, and we stay on the page. window.location
+      // is more reliable on mobile Safari than a programmatic anchor click.
       const prep = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/zip-prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -221,13 +220,12 @@ export default function Gallery() {
         throw new Error(err.error || `HTTP ${prep.status}`);
       }
       const { session_id } = await prep.json() as { session_id: string };
-      const a = document.createElement('a');
-      a.href = `/api/gallery-access/${encodeURIComponent(token)}/zip?s=${encodeURIComponent(session_id)}`;
-      a.download = `wedding-photos-${session_id}.zip`;
-      a.rel = 'noopener';
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      showToast(`Preparing ${totalItems} items as a zip — check your downloads.`);
+      const zipUrl = `/api/gallery-access/${encodeURIComponent(token)}/zip?s=${encodeURIComponent(session_id)}`;
+      showToast(`Preparing ${totalItems} items as a zip — check your downloads in a moment.`);
       maybeClear();
+      // Top-level nav. The server responds with Content-Disposition: attachment
+      // so the browser intercepts before navigating away.
+      window.location.href = zipUrl;
     } catch (err) {
       console.error(err);
       showToast(`Download failed: ${(err as Error).message}`);
@@ -777,11 +775,19 @@ function ShareTab({
 }) {
   const [name, setName] = useState<string>(() => safeReadStored('guest_upload_name') ?? '');
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [busy, setBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cancelledIds = useRef<Set<string>>(new Set());
+
+  // Auto-pump worker pool. Workers spawn whenever the queue contains items
+  // and stay alive until the queue drains, so guests can keep adding files
+  // mid-upload and the new ones get picked up automatically.
+  const queueRef = useRef<QueueItem[]>([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  const workersActiveRef = useRef(0);
+  const completedSinceFlushRef = useRef(0);
+  const busy = queue.some((it) => it.status === 'uploading');
 
   useEffect(() => {
     if (name) safeWriteStored('guest_upload_name', name);
@@ -914,38 +920,65 @@ function ShareTab({
     }
   }, [token, name]);
 
-  const startQueue = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
+  // Atomically claim the next 'queued' item and flip it to 'uploading' in
+  // both the synchronous ref-mirror and the React state. JS is single-
+  // threaded, so two workers calling this never grab the same item.
+  const claimNext = useCallback((): QueueItem | null => {
+    const q = queueRef.current;
+    for (let i = 0; i < q.length; i++) {
+      const it = q[i];
+      if (it.status === 'queued' && !cancelledIds.current.has(it.id)) {
+        const claimed = { ...it, status: 'uploading' as const, progress: 0.01 };
+        q[i] = claimed;
+        setQueue((curr) => curr.map((x) => (x.id === claimed.id ? claimed : x)));
+        return it;
+      }
+    }
+    return null;
+  }, []);
+
+  const flushCompletionToast = useCallback(() => {
+    const n = completedSinceFlushRef.current;
+    if (n > 0) {
+      completedSinceFlushRef.current = 0;
+      showToast(
+        n === 1
+          ? 'Thanks! Your share is now in the gallery.'
+          : `Thanks! ${n} items added to the gallery.`,
+      );
+    }
+  }, [showToast]);
+
+  const runWorker = useCallback(async () => {
     try {
-      const todo = queue.filter((it) => it.status === 'queued');
-      const completed: Upload[] = [];
-      let cursor = 0;
-
-      // Worker pool: up to UPLOAD_CONCURRENCY items in flight at once.
-      const workers = new Array(Math.min(UPLOAD_CONCURRENCY, todo.length)).fill(0).map(async () => {
-        while (cursor < todo.length) {
-          const idx = cursor++;
-          const item = todo[idx];
-          if (cancelledIds.current.has(item.id)) continue;
-          const result = await uploadOne(item);
-          if (result) completed.push(result);
+      while (true) {
+        const item = claimNext();
+        if (!item) return;
+        const result = await uploadOne(item);
+        if (result) {
+          onUploaded([result]);
+          completedSinceFlushRef.current++;
         }
-      });
-      await Promise.all(workers);
-
-      if (completed.length > 0) {
-        onUploaded(completed);
-        showToast(
-          completed.length === 1
-            ? 'Thanks! Your share is now in the gallery.'
-            : `Thanks! ${completed.length} items added to the gallery.`
-        );
       }
     } finally {
-      setBusy(false);
+      workersActiveRef.current--;
+      if (workersActiveRef.current === 0) flushCompletionToast();
     }
-  }, [busy, queue, uploadOne, onUploaded, showToast]);
+  }, [claimNext, uploadOne, onUploaded, flushCompletionToast]);
+
+  const pumpQueue = useCallback(() => {
+    while (workersActiveRef.current < UPLOAD_CONCURRENCY) {
+      const q = queueRef.current;
+      const hasQueued = q.some((it) => it.status === 'queued' && !cancelledIds.current.has(it.id));
+      if (!hasQueued) break;
+      workersActiveRef.current++;
+      void runWorker();
+    }
+  }, [runWorker]);
+
+  // Whenever the queue changes (file added, retry, etc.) make sure workers
+  // are running up to the concurrency cap.
+  useEffect(() => { pumpQueue(); }, [queue, pumpQueue]);
 
   const retryFailed = useCallback(() => {
     setQueue((q) => q.map((it) =>
@@ -953,9 +986,8 @@ function ShareTab({
         ? { ...it, status: 'queued', progress: 0, message: undefined }
         : it
     ));
-    // startQueue picks up newly-queued items on its next tick.
-    setTimeout(() => { void startQueue(); }, 0);
-  }, [startQueue]);
+    // The pumpQueue useEffect will fire when the new queue state lands.
+  }, []);
 
   const queuedCount = queue.filter((it) => it.status === 'queued').length;
   const errorCount = queue.filter((it) => it.status === 'error').length;
@@ -1039,8 +1071,8 @@ function ShareTab({
             {isDragging ? 'Drop to add' : 'Add your photos & videos'}
           </p>
           <p className="font-serif text-[11px] sm:text-xs text-gray-500 mb-4 sm:mb-5 px-2">
-            <span className="sm:hidden">Tap to choose · up to 500 MB each</span>
-            <span className="hidden sm:inline">Drag &amp; drop, or choose files · up to 500 MB each · JPG, PNG, HEIC, MP4, MOV</span>
+            <span className="sm:hidden">Tap to choose · uploads start automatically · up to 500 MB each</span>
+            <span className="hidden sm:inline">Drag &amp; drop or choose files · uploads start as soon as you add them · up to 500 MB each · JPG, PNG, HEIC, MP4, MOV</span>
           </p>
           <span
             className="inline-flex items-center gap-2 bg-[#8b0000] text-white font-serif text-sm px-5 py-2.5 rounded-full shadow-sm shadow-[#8b0000]/20 min-h-[44px]"
@@ -1076,6 +1108,16 @@ function ShareTab({
                 {doneCount > 0 && <span className="ml-2 text-emerald-600">· {doneCount} uploaded</span>}
               </p>
               <div className="flex items-center gap-2 flex-wrap">
+                {busy ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-serif text-[#8b0000] bg-[#8b0000]/10 px-3 py-1.5 rounded-full">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Uploading {queuedCount > 0 ? `· ${queuedCount} queued` : '…'}
+                  </span>
+                ) : queuedCount > 0 ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-serif text-gray-500 bg-gray-100 px-3 py-1.5 rounded-full">
+                    {queuedCount} queued
+                  </span>
+                ) : null}
                 {doneCount > 0 && !busy && (
                   <button
                     onClick={clearCompleted}
@@ -1092,14 +1134,6 @@ function ShareTab({
                     <AlertTriangle className="w-3.5 h-3.5" /> Retry {errorCount} failed
                   </button>
                 )}
-                <button
-                  onClick={startQueue}
-                  disabled={busy || queuedCount === 0}
-                  className="inline-flex items-center gap-2 bg-[#8b0000] hover:bg-[#a00000] text-white font-serif text-sm px-4 py-2 rounded-full shadow-sm shadow-[#8b0000]/20 disabled:opacity-50 disabled:shadow-none transition-all"
-                >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
-                  {busy ? 'Uploading…' : `Upload ${queuedCount > 0 ? queuedCount : ''}`}
-                </button>
               </div>
             </div>
 

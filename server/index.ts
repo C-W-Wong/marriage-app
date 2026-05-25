@@ -747,14 +747,33 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       };
     });
 
+    // For guest-uploaded IMAGES we ask Supabase to deliver a resized version
+    // (width 600px, quality 70) via the image-transform signed-URL endpoint
+    // so the grid serves ~50–150 KB WebPs instead of 5–25 MB originals.
+    // The transform endpoint is per-call, so parallel them with Promise.all.
+    const imageUploadThumbs = await Promise.all(
+      uploads.filter((u) => u.media_type === 'image').map(async (u) => {
+        const { data, error } = await getSupabase().storage
+          .from(PHOTOS_BUCKET)
+          .createSignedUrl(u.storage_path, SIGNED_URL_TTL_SECONDS, {
+            transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
+          });
+        if (error || !data) return [u.id, null] as const;
+        return [u.id, data.signedUrl] as const;
+      })
+    );
+    const transformThumbByUploadId = new Map(imageUploadThumbs);
+
     const guestUploads = uploads.map((u) => {
-      const thumbKey = u.thumbnail_path || u.storage_path;
+      const transformThumb = transformThumbByUploadId.get(u.id);
       return {
         id: u.id,
         media_type: u.media_type,
         file_name: u.file_name,
         mime_type: u.mime_type,
-        thumb_url: signed[thumbKey] || null,
+        thumb_url: u.media_type === 'image'
+          ? (transformThumb ?? signed[u.storage_path] ?? null)
+          : (signed[u.storage_path] ?? null),
         view_url: signed[u.storage_path] || null,
         width: u.width,
         height: u.height,
@@ -936,6 +955,10 @@ app.get('/api/gallery-access/:token/zip', galleryLimiter, async (req, res) => {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
     res.setHeader('Cache-Control', 'no-store');
+    // Push headers immediately so mobile browsers know this is a download
+    // before the first archive byte streams (which can take several seconds
+    // while we fetch the first photo from Supabase).
+    res.flushHeaders();
 
     const archive = archiver('zip', { store: true }); // photos are already compressed
     archive.on('warning', (err) => { if (err.code !== 'ENOENT') console.error('zip warning', err); });
@@ -1152,9 +1175,21 @@ app.post('/api/gallery-access/:token/upload-complete', uploadLimiterGuest, async
     );
 
     const created = rows[0];
-    const { data: signed } = await getSupabase().storage
+    const { data: full } = await getSupabase().storage
       .from(PHOTOS_BUCKET)
       .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS);
+
+    // Generate a small WebP thumbnail URL for images so the gallery doesn't
+    // have to download the multi-MB original just to render a 200px tile.
+    let thumb = full?.signedUrl ?? null;
+    if (pending.media_type === 'image') {
+      const { data: t } = await getSupabase().storage
+        .from(PHOTOS_BUCKET)
+        .createSignedUrl(pending.storage_path, SIGNED_URL_TTL_SECONDS, {
+          transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
+        });
+      if (t?.signedUrl) thumb = t.signedUrl;
+    }
 
     res.status(201).json({
       media: {
@@ -1168,8 +1203,8 @@ app.post('/api/gallery-access/:token/upload-complete', uploadLimiterGuest, async
         duration_seconds: dur,
         uploader_name: pending.uploader_name,
         created_at: created.created_at,
-        thumb_url: signed?.signedUrl ?? null,
-        view_url: signed?.signedUrl ?? null,
+        thumb_url: thumb,
+        view_url: full?.signedUrl ?? null,
         can_download: true,
       },
     });
