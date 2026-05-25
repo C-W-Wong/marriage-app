@@ -140,7 +140,7 @@ app.use(helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:", "blob:"],
       frameSrc: ["'self'", "https://maps.google.com", "https://www.google.com", "https://maps.googleapis.com"],
-      mediaSrc: ["'self'", "blob:"],
+      mediaSrc: ["'self'", "blob:", "https://*.supabase.co"],
       connectSrc: ["'self'", "data:", "https://calendar.google.com", "https://maps.apple.com", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://*.supabase.co"],
     },
   },
@@ -716,12 +716,16 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
     const photoRows = await fetchGroupPhotos(sourceGroupIds);
     const uploads = await fetchGuestUploads();
 
+    // Sign both the thumbnail and the original for every photo so the lightbox
+    // can show the full-res original instead of the small thumbnail.
     const pathsToSign = new Set<string>();
-    for (const p of photoRows) pathsToSign.add(p.thumbnail_path || p.storage_path);
+    for (const p of photoRows) {
+      if (p.thumbnail_path) pathsToSign.add(p.thumbnail_path);
+      pathsToSign.add(p.storage_path);
+    }
     for (const u of uploads) {
       if (u.thumbnail_path) pathsToSign.add(u.thumbnail_path);
-      else pathsToSign.add(u.storage_path);
-      if (u.media_type === 'video') pathsToSign.add(u.storage_path); // need playback url too
+      pathsToSign.add(u.storage_path);
     }
     const signed = await signPaths(Array.from(pathsToSign));
 
@@ -730,11 +734,13 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       // Master link makes every category downloadable; regular link follows
       // the group's flag for its own photos and view-only for couple.
       const canDownload = isMaster ? true : (isCouple ? false : group.can_download);
+      const thumbKey = p.thumbnail_path || p.storage_path;
       return {
         id: p.id,
         group_id: p.group_id,
         file_name: p.file_name,
-        thumb_url: signed[p.thumbnail_path || p.storage_path] || null,
+        thumb_url: signed[thumbKey] || null,
+        full_url: signed[p.storage_path] || null,
         width: p.width,
         height: p.height,
         can_download: canDownload,
@@ -749,7 +755,7 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
         file_name: u.file_name,
         mime_type: u.mime_type,
         thumb_url: signed[thumbKey] || null,
-        view_url: u.media_type === 'video' ? signed[u.storage_path] || null : signed[thumbKey] || null,
+        view_url: signed[u.storage_path] || null,
         width: u.width,
         height: u.height,
         duration_seconds: u.duration_seconds,
@@ -1057,7 +1063,7 @@ app.post('/api/gallery-access/:token/upload-init', uploadLimiterGuest, async (re
     if (!allowed.has(mimeType.toLowerCase())) {
       res.status(400).json({ error: `Unsupported ${mediaType} format` }); return;
     }
-    if (uploaderName !== undefined && (typeof uploaderName !== 'string' || uploaderName.length > 80)) {
+    if (uploaderName != null && (typeof uploaderName !== 'string' || uploaderName.length > 80)) {
       res.status(400).json({ error: 'uploaderName must be a string up to 80 chars' }); return;
     }
 

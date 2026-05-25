@@ -12,6 +12,7 @@ type Photo = {
   group_id: string;
   file_name: string;
   thumb_url: string | null;
+  full_url: string | null;
   width: number | null;
   height: number | null;
   can_download: boolean;
@@ -782,7 +783,7 @@ function ShareTab({
           fileSize: item.file.size,
           mimeType: item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'),
           mediaType: item.media_type,
-          uploaderName: name.trim() || null,
+          uploaderName: name.trim() || undefined,
         }),
       });
       if (!initRes.ok) {
@@ -895,7 +896,7 @@ function ShareTab({
         <input
           value={name}
           onChange={(e) => setName(e.target.value.slice(0, 80))}
-          placeholder="e.g. Amy"
+          placeholder="e.g. Christopher"
           className="mt-1.5 w-full sm:max-w-sm bg-white border border-gray-200 rounded-lg px-4 py-2.5 text-sm font-serif outline-none focus:border-[#8b0000] focus:ring-2 focus:ring-[#8b0000]/10 transition-all"
         />
       </label>
@@ -1258,7 +1259,9 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onSave, downloading }
   const isUpload = 'media_type' in item;
   const isVideo = isUpload && (item as Upload).media_type === 'video';
   const canDownload = (isUpload ? (item as Upload).can_download : (item as Photo).can_download);
-  const src = isUpload ? (item as Upload).view_url : (item as Photo).thumb_url;
+  const src = isUpload
+    ? (item as Upload).view_url
+    : ((item as Photo).full_url ?? (item as Photo).thumb_url);
   const uploaderName = isUpload ? (item as Upload).uploader_name : null;
 
   return (
