@@ -1029,9 +1029,13 @@ function safeExt(name: string): string {
   return m ? m[1] : 'bin';
 }
 
+// Guest upload limiter — every uploaded file makes 2 server calls
+// (init + complete), so a guest uploading 100 photos with parallelism = 200
+// calls. Be generous: 600/min/IP allows ~300 files/min while still blocking
+// runaway abuse.
 const uploadLimiterGuest = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 600,
   message: { error: 'Too many uploads, please slow down' },
   standardHeaders: true,
   legacyHeaders: false,

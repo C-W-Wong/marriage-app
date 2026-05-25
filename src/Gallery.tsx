@@ -129,10 +129,16 @@ export default function Gallery() {
     }, { rootMargin: '600px 0px' });
     ob.observe(el);
     return () => ob.disconnect();
-  }, [canLoadMore, currentList.length]);
+  }, [canLoadMore, currentList.length, tab]);
 
-  const downloadIds = useCallback(async (photoIds: string[], uploadIds: string[]) => {
+  const downloadIds = useCallback(async (
+    photoIds: string[],
+    uploadIds: string[],
+    opts: { clearAfter?: boolean } = {},
+  ) => {
     if (photoIds.length + uploadIds.length === 0) return;
+    const clearAfter = opts.clearAfter ?? true;
+    const maybeClear = () => { if (clearAfter) clearAllSelections(); };
     setDownloading(true);
     try {
       const res = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/download`, {
@@ -146,6 +152,11 @@ export default function Gallery() {
       }
       const { photos } = await res.json() as { photos: { id: string; file_name: string; url: string }[] };
       const totalItems = photos.length;
+
+      if (totalItems === 0) {
+        showToast('Nothing available to download.');
+        return;
+      }
 
       // Web Share API (mobile) for small batches: lands directly in Photos / Gallery.
       const canShare =
@@ -165,16 +176,19 @@ export default function Gallery() {
           if (navigator.canShare!({ files })) {
             await navigator.share({ files });
             showToast(totalItems === 1 ? 'Saved.' : `${totalItems} items shared — pick "Save to Photos".`);
-            clearAllSelections();
+            maybeClear();
             return;
           }
         } catch (err) {
-          if ((err as Error).name === 'AbortError') { clearAllSelections(); return; }
+          if ((err as Error).name === 'AbortError') { maybeClear(); return; }
+          // Non-abort error in share path: don't silently fall through into another download.
+          throw err;
         }
       }
 
       if (totalItems === 1) {
         const p = photos[0];
+        let downloaded = false;
         try {
           const r = await fetch(p.url);
           if (!r.ok) throw new Error('fetch failed');
@@ -183,12 +197,16 @@ export default function Gallery() {
           const a = document.createElement('a');
           a.href = objectUrl; a.download = p.file_name;
           document.body.appendChild(a); a.click(); document.body.removeChild(a);
-          setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+          downloaded = true;
+          // Give the browser plenty of time to read the blob before revoking.
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
         } catch {
-          window.location.href = p.url;
+          // Fallback: open the signed URL in a new tab so we don't unload the SPA.
+          const fallback = window.open(p.url, '_blank', 'noopener,noreferrer');
+          if (fallback) downloaded = true;
         }
-        showToast('Downloaded.');
-        clearAllSelections();
+        showToast(downloaded ? 'Downloaded.' : 'Could not start the download — please try again.');
+        if (downloaded) maybeClear();
         return;
       }
 
@@ -205,10 +223,11 @@ export default function Gallery() {
       const { session_id } = await prep.json() as { session_id: string };
       const a = document.createElement('a');
       a.href = `/api/gallery-access/${encodeURIComponent(token)}/zip?s=${encodeURIComponent(session_id)}`;
+      a.download = `wedding-photos-${session_id}.zip`;
       a.rel = 'noopener';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       showToast(`Preparing ${totalItems} items as a zip — check your downloads.`);
-      clearAllSelections();
+      maybeClear();
     } catch (err) {
       console.error(err);
       showToast(`Download failed: ${(err as Error).message}`);
@@ -238,10 +257,19 @@ export default function Gallery() {
   }, []);
   const selectAllVisible = useCallback(() => {
     if (tab === 'uploads') {
-      setSelectedUploads(new Set(visible.map((v) => v.id)));
+      const ids = (visible as Upload[]).filter((u) => u.can_download).map((u) => u.id);
+      setSelectedUploads((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) next.add(id);
+        return next;
+      });
     } else {
       const ids = (visible as Photo[]).filter((p) => p.can_download).map((p) => p.id);
-      setSelectedPhotos(new Set(ids));
+      setSelectedPhotos((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) next.add(id);
+        return next;
+      });
     }
   }, [tab, visible]);
   const totalSelected = selectedPhotos.size + selectedUploads.size;
@@ -265,7 +293,10 @@ export default function Gallery() {
   }, [lightbox?.list, filteredPhotos, data?.guest_uploads]);
 
   const handleUploadsAdded = useCallback((newOnes: Upload[]) => {
+    if (newOnes.length === 0) return;
     setData((d) => d ? { ...d, guest_uploads: [...newOnes, ...d.guest_uploads] } : d);
+    // Keep the lightbox pointed at the same item if it's open on uploads.
+    setLightbox((l) => l && l.list === 'uploads' ? { ...l, index: l.index + newOnes.length } : l);
   }, []);
 
   if (status === 'loading') {
@@ -336,7 +367,7 @@ export default function Gallery() {
             return (
               <button
                 key={t.key}
-                onClick={() => { setTab(t.key); clearAllSelections(); }}
+                onClick={() => { setTab(t.key); clearAllSelections(); setLightbox(null); }}
                 className={`relative px-4 sm:px-5 py-3.5 sm:py-3 text-[13px] sm:text-sm font-serif transition-colors -mb-px whitespace-nowrap inline-flex items-center gap-1.5 sm:gap-2 min-h-[44px] ${
                   active ? 'text-[#8b0000]' : 'text-gray-500 hover:text-[#1a1a1a]'
                 }`}
@@ -376,7 +407,7 @@ export default function Gallery() {
               <PhotosTab
                 data={data}
                 category={category}
-                onCategoryChange={(c) => { setCategory(c); clearAllSelections(); }}
+                onCategoryChange={(c) => { setCategory(c); clearAllSelections(); setLightbox(null); }}
                 visible={visible as Photo[]}
                 selected={selectedPhotos}
                 onToggle={togglePhoto}
@@ -437,8 +468,8 @@ export default function Gallery() {
             onPrev={() => setLightbox((l) => l && { ...l, index: Math.max(0, l.index - 1) })}
             onNext={() => setLightbox((l) => l && { ...l, index: Math.min(list.length - 1, l.index + 1) })}
             onSave={(item) => {
-              if ('media_type' in item) downloadIds([], [item.id]);
-              else downloadIds([item.id], []);
+              if ('media_type' in item) downloadIds([], [item.id], { clearAfter: false });
+              else downloadIds([item.id], [], { clearAfter: false });
             }}
             downloading={downloading}
           />
@@ -707,6 +738,35 @@ type QueueItem = {
 const MAX_FILE_BYTES = 500 * 1024 * 1024;
 const IMG_MIME = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif'];
 const VIDEO_MIME = ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/3gpp'];
+const UPLOAD_CONCURRENCY = 3;
+const UPLOAD_MAX_RETRIES = 3;
+
+// Retry only on transient failures: network errors, 429, and 5xx.
+// 4xx other than 429 is a client error — retrying won't help.
+function isTransientError(err: unknown): boolean {
+  const msg = (err as Error)?.message ?? '';
+  if (/Network error/i.test(msg)) return true;
+  if (/HTTP (429|5\d\d)/.test(msg)) return true;
+  if (/Upload failed \((429|5\d\d)\)/.test(msg)) return true;
+  return false;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, onAttempt?: (attempt: number) => void): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt++) {
+    try {
+      onAttempt?.(attempt);
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err) || attempt === UPLOAD_MAX_RETRIES) throw err;
+      // Exponential backoff with jitter: ~1s, ~2s, ~4s.
+      const delay = (2 ** (attempt - 1)) * 1000 + Math.random() * 300;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
 
 function ShareTab({
   token, onUploaded, showToast,
@@ -715,15 +775,17 @@ function ShareTab({
   onUploaded: (uploads: Upload[]) => void;
   showToast: (msg: string) => void;
 }) {
-  const [name, setName] = useState<string>(() => localStorage.getItem('guest_upload_name') || '');
+  const [name, setName] = useState<string>(() => safeReadStored('guest_upload_name') ?? '');
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cancelledIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (name) localStorage.setItem('guest_upload_name', name);
+    if (name) safeWriteStored('guest_upload_name', name);
+    else safeRemoveStored('guest_upload_name');
   }, [name]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
@@ -732,15 +794,15 @@ function ShareTab({
       const isImg = IMG_MIME.includes(f.type.toLowerCase()) || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(f.name);
       const isVid = VIDEO_MIME.includes(f.type.toLowerCase()) || /\.(mp4|mov|webm|m4v|3gp)$/i.test(f.name);
       if (!isImg && !isVid) {
-        added.push({ id: crypto.randomUUID(), file: f, media_type: 'image', status: 'error', progress: 0, message: 'Unsupported file type' });
+        added.push({ id: makeQueueId(), file: f, media_type: 'image', status: 'error', progress: 0, message: 'Unsupported file type' });
         continue;
       }
       if (f.size > MAX_FILE_BYTES) {
-        added.push({ id: crypto.randomUUID(), file: f, media_type: isVid ? 'video' : 'image', status: 'error', progress: 0, message: 'File exceeds 500 MB limit' });
+        added.push({ id: makeQueueId(), file: f, media_type: isVid ? 'video' : 'image', status: 'error', progress: 0, message: 'File exceeds 500 MB limit' });
         continue;
       }
       added.push({
-        id: crypto.randomUUID(), file: f,
+        id: makeQueueId(), file: f,
         media_type: isVid ? 'video' : 'image',
         status: 'queued', progress: 0,
       });
@@ -749,6 +811,7 @@ function ShareTab({
   }, []);
 
   const removeItem = useCallback((id: string) => {
+    cancelledIds.current.add(id);
     setQueue((q) => q.filter((it) => it.id !== id));
   }, []);
 
@@ -760,6 +823,7 @@ function ShareTab({
     const setItem = (patch: Partial<QueueItem>) =>
       setQueue((q) => q.map((it) => (it.id === item.id ? { ...it, ...patch } : it)));
 
+    if (cancelledIds.current.has(item.id)) return null;
     setItem({ status: 'uploading', progress: 0.01, message: undefined });
 
     let width: number | undefined, height: number | undefined, duration: number | undefined;
@@ -769,48 +833,58 @@ function ShareTab({
         width = dim.width; height = dim.height;
       } else {
         const dim = await readVideoDimensions(item.file);
-        width = dim.width; height = dim.height; duration = dim.duration;
+        width = dim.width; height = dim.height;
+        duration = Number.isFinite(dim.duration) ? dim.duration : undefined;
       }
     } catch { /* dimensions are optional */ }
+    if (cancelledIds.current.has(item.id)) return null;
 
     let init: { upload_id: string; signed_url: string; supabase_path: string };
     try {
-      const initRes = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/upload-init`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: item.file.name,
-          fileSize: item.file.size,
-          mimeType: item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'),
-          mediaType: item.media_type,
-          uploaderName: name.trim() || undefined,
-        }),
+      init = await withRetry(async () => {
+        const initRes = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/upload-init`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: item.file.name,
+            fileSize: item.file.size,
+            mimeType: item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'),
+            mediaType: item.media_type,
+            uploaderName: name.trim() || undefined,
+          }),
+        });
+        if (!initRes.ok) {
+          const err = await initRes.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${initRes.status}`);
+        }
+        return initRes.json();
+      }, (attempt) => {
+        if (attempt > 1) setItem({ message: `Retrying (${attempt}/${UPLOAD_MAX_RETRIES})…` });
       });
-      if (!initRes.ok) {
-        const err = await initRes.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${initRes.status}`);
-      }
-      init = await initRes.json();
     } catch (err) {
       setItem({ status: 'error', message: (err as Error).message });
       return null;
     }
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', init.signed_url);
-        xhr.setRequestHeader('Content-Type', item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'));
-        xhr.setRequestHeader('x-upsert', 'true');
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) setItem({ progress: 0.02 + 0.93 * (e.loaded / e.total) });
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed (${xhr.status})`));
-        };
-        xhr.onerror = () => reject(new Error('Network error during upload'));
-        xhr.send(item.file);
+      await withRetry(async () => {
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('PUT', init.signed_url);
+          xhr.setRequestHeader('Content-Type', item.file.type || (item.media_type === 'image' ? 'image/jpeg' : 'video/mp4'));
+          xhr.setRequestHeader('x-upsert', 'true');
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) setItem({ progress: 0.02 + 0.93 * (e.loaded / e.total) });
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve();
+            else reject(new Error(`Upload failed (${xhr.status})`));
+          };
+          xhr.onerror = () => reject(new Error('Network error during upload'));
+          xhr.send(item.file);
+        });
+      }, (attempt) => {
+        if (attempt > 1) setItem({ progress: 0.02, message: `Retrying upload (${attempt}/${UPLOAD_MAX_RETRIES})…` });
       });
     } catch (err) {
       setItem({ status: 'error', message: (err as Error).message });
@@ -819,16 +893,19 @@ function ShareTab({
 
     setItem({ progress: 0.96, message: 'Saving…' });
     try {
-      const compRes = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/upload-complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: init.upload_id, width, height, duration_seconds: duration }),
+      const media = await withRetry(async () => {
+        const compRes = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/upload-complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upload_id: init.upload_id, width, height, duration_seconds: duration }),
+        });
+        if (!compRes.ok) {
+          const err = await compRes.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${compRes.status}`);
+        }
+        const j = await compRes.json() as { media: Upload };
+        return j.media;
       });
-      if (!compRes.ok) {
-        const err = await compRes.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${compRes.status}`);
-      }
-      const { media } = await compRes.json() as { media: Upload };
       setItem({ status: 'done', progress: 1, message: undefined });
       return media;
     } catch (err) {
@@ -843,10 +920,20 @@ function ShareTab({
     try {
       const todo = queue.filter((it) => it.status === 'queued');
       const completed: Upload[] = [];
-      for (const item of todo) {
-        const result = await uploadOne(item);
-        if (result) completed.push(result);
-      }
+      let cursor = 0;
+
+      // Worker pool: up to UPLOAD_CONCURRENCY items in flight at once.
+      const workers = new Array(Math.min(UPLOAD_CONCURRENCY, todo.length)).fill(0).map(async () => {
+        while (cursor < todo.length) {
+          const idx = cursor++;
+          const item = todo[idx];
+          if (cancelledIds.current.has(item.id)) continue;
+          const result = await uploadOne(item);
+          if (result) completed.push(result);
+        }
+      });
+      await Promise.all(workers);
+
       if (completed.length > 0) {
         onUploaded(completed);
         showToast(
@@ -860,9 +947,37 @@ function ShareTab({
     }
   }, [busy, queue, uploadOne, onUploaded, showToast]);
 
+  const retryFailed = useCallback(() => {
+    setQueue((q) => q.map((it) =>
+      it.status === 'error' && it.message !== 'Unsupported file type' && it.message !== 'File exceeds 500 MB limit'
+        ? { ...it, status: 'queued', progress: 0, message: undefined }
+        : it
+    ));
+    // startQueue picks up newly-queued items on its next tick.
+    setTimeout(() => { void startQueue(); }, 0);
+  }, [startQueue]);
+
   const queuedCount = queue.filter((it) => it.status === 'queued').length;
   const errorCount = queue.filter((it) => it.status === 'error').length;
   const doneCount = queue.filter((it) => it.status === 'done').length;
+
+  const resetDrag = useCallback(() => {
+    dragCounter.current = 0;
+    setIsDragging(false);
+  }, []);
+
+  // If a drag is cancelled outside the dropzone (released over the desktop, alt-tab, etc.)
+  // the local dragleave on the button never fires — listen at the window level too.
+  useEffect(() => {
+    window.addEventListener('dragend', resetDrag);
+    window.addEventListener('drop', resetDrag);
+    window.addEventListener('blur', resetDrag);
+    return () => {
+      window.removeEventListener('dragend', resetDrag);
+      window.removeEventListener('drop', resetDrag);
+      window.removeEventListener('blur', resetDrag);
+    };
+  }, [resetDrag]);
 
   const onDragEnter = (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
@@ -877,8 +992,7 @@ function ShareTab({
   const onDragOver = (e: React.DragEvent<HTMLElement>) => { e.preventDefault(); };
   const onDrop = (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
-    dragCounter.current = 0;
-    setIsDragging(false);
+    resetDrag();
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
@@ -961,13 +1075,21 @@ function ShareTab({
                 {errorCount > 0 && <span className="ml-2 text-amber-600">· {errorCount} error{errorCount === 1 ? '' : 's'}</span>}
                 {doneCount > 0 && <span className="ml-2 text-emerald-600">· {doneCount} uploaded</span>}
               </p>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {doneCount > 0 && !busy && (
                   <button
                     onClick={clearCompleted}
                     className="text-xs font-serif text-gray-500 hover:text-[#1a1a1a] px-3 py-2"
                   >
                     Clear uploaded
+                  </button>
+                )}
+                {errorCount > 0 && !busy && (
+                  <button
+                    onClick={retryFailed}
+                    className="inline-flex items-center gap-1.5 text-xs font-serif text-amber-700 hover:text-amber-900 border border-amber-300 hover:border-amber-500 px-3 py-2 rounded-full transition-colors"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" /> Retry {errorCount} failed
                   </button>
                 )}
                 <button
@@ -1063,10 +1185,11 @@ function PhotoTile({ photo, selectable, selected, onToggle, onOpen }: {
       }`}
       style={{ aspectRatio: aspect }}
       onClick={(e) => {
+        if (longPress.consumeIfTriggered()) return;
         if (selectable && (e.metaKey || e.ctrlKey || e.shiftKey)) { onToggle(); return; }
         onOpen();
       }}
-      {...longPress}
+      {...longPress.bind}
     >
       {photo.thumb_url ? (
         <img
@@ -1121,7 +1244,8 @@ function UploadTile({ upload, selected, onToggle, onOpen }: {
   onOpen: () => void;
 }) {
   const aspect = upload.width && upload.height ? `${upload.width} / ${upload.height}` : '1 / 1';
-  const longPress = useLongPress(onToggle, 380);
+  const selectable = upload.can_download;
+  const longPress = useLongPress(() => { if (selectable) onToggle(); }, 380);
 
   return (
     <div
@@ -1132,10 +1256,11 @@ function UploadTile({ upload, selected, onToggle, onOpen }: {
       }`}
       style={{ aspectRatio: aspect }}
       onClick={(e) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey) { onToggle(); return; }
+        if (longPress.consumeIfTriggered()) return;
+        if (selectable && (e.metaKey || e.ctrlKey || e.shiftKey)) { onToggle(); return; }
         onOpen();
       }}
-      {...longPress}
+      {...longPress.bind}
     >
       {upload.media_type === 'video' ? (
         <>
@@ -1182,17 +1307,27 @@ function UploadTile({ upload, selected, onToggle, onOpen }: {
         </p>
       )}
 
-      <button
-        onClick={(e) => { e.stopPropagation(); onToggle(); }}
-        aria-label={selected ? 'Deselect' : 'Select'}
-        className={`absolute top-2 left-2 w-8 h-8 sm:w-7 sm:h-7 rounded-full grid place-items-center transition-all ${
-          selected
-            ? 'bg-[#8b0000] text-white shadow-md scale-100'
-            : 'bg-black/40 text-white opacity-95 sm:opacity-0 sm:group-hover:opacity-100 sm:scale-90 sm:group-hover:scale-100 backdrop-blur'
-        }`}
-      >
-        {selected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border-2 border-white" />}
-      </button>
+      {selectable ? (
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggle(); }}
+          aria-label={selected ? 'Deselect' : 'Select'}
+          className={`absolute top-2 left-2 w-8 h-8 sm:w-7 sm:h-7 rounded-full grid place-items-center transition-all ${
+            selected
+              ? 'bg-[#8b0000] text-white shadow-md scale-100'
+              : 'bg-black/40 text-white opacity-95 sm:opacity-0 sm:group-hover:opacity-100 sm:scale-90 sm:group-hover:scale-100 backdrop-blur'
+          }`}
+        >
+          {selected ? <Check className="w-4 h-4" /> : <span className="w-3 h-3 rounded-full border-2 border-white" />}
+        </button>
+      ) : (
+        <span
+          aria-label="View only"
+          title="View only"
+          className="absolute top-2 left-2 w-8 h-8 sm:w-7 sm:h-7 rounded-full bg-black/40 text-white grid place-items-center backdrop-blur opacity-95"
+        >
+          <Lock className="w-3.5 h-3.5" />
+        </span>
+      )}
     </div>
   );
 }
@@ -1271,14 +1406,22 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onSave, downloading }
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-40 bg-black/95 backdrop-blur-sm flex items-center justify-center"
       onClick={onClose}
-      onTouchStart={(e) => { touchStartX.current = e.touches[0].clientX; }}
+      onTouchStart={(e) => {
+        // Only track single-finger gestures so pinch-zoom doesn't register as a swipe.
+        touchStartX.current = e.touches.length === 1 ? e.touches[0].clientX : null;
+      }}
+      onTouchMove={(e) => {
+        if (e.touches.length > 1) touchStartX.current = null;
+      }}
       onTouchEnd={(e) => {
-        if (touchStartX.current == null) return;
-        const dx = e.changedTouches[0].clientX - touchStartX.current;
+        const start = touchStartX.current;
+        touchStartX.current = null;
+        if (start == null || e.changedTouches.length !== 1 || e.touches.length > 0) return;
+        const dx = e.changedTouches[0].clientX - start;
         if (dx > 50) onPrev();
         else if (dx < -50) onNext();
-        touchStartX.current = null;
       }}
+      onTouchCancel={() => { touchStartX.current = null; }}
     >
       <motion.div
         key={`lb-${index}`}
@@ -1573,32 +1716,60 @@ function readVideoDimensions(file: File): Promise<{ width: number; height: numbe
   return new Promise((resolve, reject) => {
     const v = document.createElement('video');
     const url = URL.createObjectURL(file);
+    let settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; URL.revokeObjectURL(url); fn(); };
     v.preload = 'metadata';
-    v.onloadedmetadata = () => {
-      URL.revokeObjectURL(url);
-      resolve({ width: v.videoWidth, height: v.videoHeight, duration: v.duration });
-    };
-    v.onerror = () => { URL.revokeObjectURL(url); reject(new Error('video load failed')); };
+    v.onloadedmetadata = () => finish(() => resolve({ width: v.videoWidth, height: v.videoHeight, duration: v.duration }));
+    v.onerror = () => finish(() => reject(new Error('video load failed')));
+    // Bail out if the browser can't parse metadata (corrupt / unsupported codec) — keeps the upload queue moving.
+    setTimeout(() => finish(() => reject(new Error('video metadata timed out'))), 8_000);
     v.src = url;
   });
 }
 
+function safeReadStored(key: string): string | null {
+  try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; }
+  catch { return null; }
+}
+function safeWriteStored(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* private mode etc. */ }
+}
+function safeRemoveStored(key: string): void {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
+
+function makeQueueId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  } catch { /* fall through */ }
+  return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // Long-press handler for touch-first selection. Mouse users already have shift/cmd-click.
+// Returns event bindings plus a `consumeIfTriggered` the outer onClick can use to short-circuit
+// the synthetic click that some Android browsers still dispatch after a long-press.
 function useLongPress(callback: () => void, delay = 380) {
   const timer = useRef<number | null>(null);
   const triggered = useRef(false);
+  const cbRef = useRef(callback);
+  cbRef.current = callback;
 
-  const clear = () => {
+  const clear = useCallback(() => {
     if (timer.current != null) { window.clearTimeout(timer.current); timer.current = null; }
-  };
+  }, []);
 
-  return {
-    onTouchStart: () => {
+  // Cancel any pending timer when the host unmounts so the callback can't fire on stale state.
+  useEffect(() => () => clear(), [clear]);
+
+  const bind = useMemo(() => ({
+    onTouchStart: (e: React.TouchEvent) => {
       triggered.current = false;
       clear();
+      // Single-finger gestures only — multi-touch is for pinch/zoom, not selection.
+      if (e.touches.length !== 1) return;
       timer.current = window.setTimeout(() => {
         triggered.current = true;
-        callback();
+        cbRef.current();
       }, delay);
     },
     onTouchEnd: (e: React.TouchEvent) => {
@@ -1610,5 +1781,13 @@ function useLongPress(callback: () => void, delay = 380) {
     },
     onTouchMove: clear,
     onTouchCancel: clear,
-  } as const;
+  }), [clear, delay]);
+
+  // Outer onClick calls this; if a long-press just fired, swallow the synthetic click and reset.
+  const consumeIfTriggered = useCallback(() => {
+    if (triggered.current) { triggered.current = false; return true; }
+    return false;
+  }, []);
+
+  return { bind, consumeIfTriggered };
 }
