@@ -4,6 +4,7 @@ import compression from 'compression';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import multer from 'multer';
+import sharp from 'sharp';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
@@ -746,7 +747,9 @@ async function fetchGuestUploads(limit = 500): Promise<UploadRow[]> {
 const imgCacheDir = join(__dirname, 'cache', 'img');
 fs.mkdirSync(imgCacheDir, { recursive: true });
 
-const IMG_VARIANTS = new Set(['thumb', 'full']);
+// thumb = grid (~80 KB pre-baked WebP), view = lightbox (~1 MB on-the-fly
+// 2000px WebP), full = original JPG for download.
+const IMG_VARIANTS = new Set(['thumb', 'view', 'full']);
 const IMG_INFLIGHT = new Map<string, Promise<Buffer>>();
 
 function pickMime(filename: string): string {
@@ -772,7 +775,12 @@ async function downloadFromSupabase(storagePath: string): Promise<Buffer> {
   return Buffer.from(await data.arrayBuffer());
 }
 
-async function getCachedImage(cacheKey: string, storagePath: string): Promise<Buffer> {
+// Fetch original from Supabase, optionally transform, cache the result.
+async function getCachedBytes(
+  cacheKey: string,
+  storagePath: string,
+  transform?: (buf: Buffer) => Promise<Buffer>
+): Promise<Buffer> {
   const cachePath = join(imgCacheDir, cacheKey);
   try {
     return await fs.promises.readFile(cachePath);
@@ -782,16 +790,25 @@ async function getCachedImage(cacheKey: string, storagePath: string): Promise<Bu
   const existing = IMG_INFLIGHT.get(cacheKey);
   if (existing) return existing;
   const inflight = (async () => {
-    const buf = await downloadFromSupabase(storagePath);
+    const original = await downloadFromSupabase(storagePath);
+    const final = transform ? await transform(original) : original;
     // Write atomically: temp then rename, so a partial file is never read.
     const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-    await fs.promises.writeFile(tmp, buf);
+    await fs.promises.writeFile(tmp, final);
     await fs.promises.rename(tmp, cachePath);
-    return buf;
+    return final;
   })().finally(() => IMG_INFLIGHT.delete(cacheKey));
   IMG_INFLIGHT.set(cacheKey, inflight);
   return inflight;
 }
+
+// .rotate() honours EXIF so portraits don't render sideways after the resize.
+const encodeViewWebp = (buf: Buffer) =>
+  sharp(buf)
+    .rotate()
+    .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 85 })
+    .toBuffer();
 
 function sendCachedImage(res: express.Response, buf: Buffer, mime: string) {
   res.setHeader('Content-Type', mime);
@@ -822,17 +839,20 @@ app.get('/img/p/:token/:variant/:photoId', galleryLimiter, async (req, res) => {
 
     if (variant === 'full' && !isMaster && photo.group_id === 'couple') {
       // Couple originals are not downloadable from per-group links.
-      // Thumbnails are still allowed so the lightbox can show a preview.
+      // `view` (2000px WebP) is still served so the lightbox works; only
+      // the master JPG download is gated.
       res.status(403).end();
       return;
     }
 
+    // `view` is always derived from the original — the pre-baked thumb is
+    // too small for the lightbox.
+    const transform = variant === 'view' ? encodeViewWebp : undefined;
     const storagePath = variant === 'thumb'
       ? (photo.thumbnail_path || photo.storage_path)
       : photo.storage_path;
-    const cacheKey = `p_${variant}_${photoId}`;
-    const buf = await getCachedImage(cacheKey, storagePath);
-    sendCachedImage(res, buf, pickMime(storagePath));
+    const buf = await getCachedBytes(`p_${variant}_${photoId}`, storagePath, transform);
+    sendCachedImage(res, buf, transform ? 'image/webp' : pickMime(storagePath));
   } catch (err) {
     console.error('img proxy (photo) failed:', (err as Error).message);
     res.status(502).end();
@@ -851,14 +871,15 @@ app.get('/img/u/:token/:variant/:uploadId', galleryLimiter, async (req, res) => 
     const upload = await fetchUploadById(uploadId);
     if (!upload) { res.status(404).end(); return; }
 
-    // Any valid token can view all guest uploads (they're shared with everyone
-    // who has gallery access). This matches the existing JSON behaviour.
+    // `view` only re-encodes images; videos fall through to the original.
+    const transform = (variant === 'view' && upload.media_type === 'image')
+      ? encodeViewWebp
+      : undefined;
     const storagePath = variant === 'thumb'
       ? (upload.thumbnail_path || upload.storage_path)
       : upload.storage_path;
-    const cacheKey = `u_${variant}_${uploadId}`;
-    const buf = await getCachedImage(cacheKey, storagePath);
-    sendCachedImage(res, buf, pickMime(storagePath));
+    const buf = await getCachedBytes(`u_${variant}_${uploadId}`, storagePath, transform);
+    sendCachedImage(res, buf, transform ? 'image/webp' : pickMime(storagePath));
   } catch (err) {
     console.error('img proxy (upload) failed:', (err as Error).message);
     res.status(502).end();
@@ -871,12 +892,14 @@ app.get('/img/u/:token/:variant/:uploadId', galleryLimiter, async (req, res) => 
 const GALLERY_PAGE_SIZE = 60;
 const GALLERY_PAGE_MAX = 120;
 
+type ProxyVariant = 'thumb' | 'view' | 'full';
+
 function buildProxyUrls(token: string) {
   const t = encodeURIComponent(token);
   return {
-    photoUrl: (variant: 'thumb' | 'full', id: string) =>
+    photoUrl: (variant: ProxyVariant, id: string) =>
       `/img/p/${t}/${variant}/${encodeURIComponent(id)}`,
-    uploadUrl: (variant: 'thumb' | 'full', id: string) =>
+    uploadUrl: (variant: ProxyVariant, id: string) =>
       `/img/u/${t}/${variant}/${encodeURIComponent(id)}`,
   };
 }
@@ -895,6 +918,8 @@ function shapePhotoRow(
     group_id: p.group_id,
     file_name: p.file_name,
     thumb_url: proxy.photoUrl('thumb', p.id),
+    // Lightbox WebP — always exposed; the proxy gates only the original (`full`).
+    view_url: proxy.photoUrl('view', p.id),
     full_url: allowFull ? proxy.photoUrl('full', p.id) : null,
     width: p.width,
     height: p.height,
@@ -965,21 +990,27 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
     const proxy = buildProxyUrls(req.params.token);
     const photos = firstPage.map((p) => shapePhotoRow(p, isMaster, group.can_download, proxy));
 
-    const guestUploads = uploads.map((u) => ({
-      id: u.id,
-      media_type: u.media_type,
-      file_name: u.file_name,
-      mime_type: u.mime_type,
-      thumb_url: proxy.uploadUrl('thumb', u.id),
-      view_url: proxy.uploadUrl('full', u.id),
-      width: u.width,
-      height: u.height,
-      duration_seconds: u.duration_seconds,
-      file_size: u.file_size,
-      uploader_name: u.uploader_name,
-      created_at: u.created_at,
-      can_download: true,
-    }));
+    const guestUploads = uploads.map((u) => {
+      // For images: view = re-encoded WebP, full = original for download.
+      // For videos: both resolve to the original file (no re-encode).
+      const viewVariant: ProxyVariant = u.media_type === 'image' ? 'view' : 'full';
+      return {
+        id: u.id,
+        media_type: u.media_type,
+        file_name: u.file_name,
+        mime_type: u.mime_type,
+        thumb_url: proxy.uploadUrl('thumb', u.id),
+        view_url: proxy.uploadUrl(viewVariant, u.id),
+        full_url: proxy.uploadUrl('full', u.id),
+        width: u.width,
+        height: u.height,
+        duration_seconds: u.duration_seconds,
+        file_size: u.file_size,
+        uploader_name: u.uploader_name,
+        created_at: u.created_at,
+        can_download: true,
+      };
+    });
 
     res.json({
       group: {

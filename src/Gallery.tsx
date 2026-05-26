@@ -12,7 +12,8 @@ type Photo = {
   group_id: string;
   file_name: string;
   thumb_url: string | null;
-  full_url: string | null;
+  view_url: string | null;  // 2000px WebP for lightbox display
+  full_url: string | null;  // original JPG for download (null if not allowed)
   width: number | null;
   height: number | null;
   can_download: boolean;
@@ -24,7 +25,8 @@ type Upload = {
   file_name: string;
   mime_type: string | null;
   thumb_url: string | null;
-  view_url: string | null;
+  view_url: string | null;  // images: 2000px WebP; videos: original file
+  full_url: string | null;  // original for download (always present)
   width: number | null;
   height: number | null;
   duration_seconds: number | null;
@@ -1561,9 +1563,11 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onSave, downloading }
   const isUpload = 'media_type' in item;
   const isVideo = isUpload && (item as Upload).media_type === 'video';
   const canDownload = (isUpload ? (item as Upload).can_download : (item as Photo).can_download);
+  // Always prefer the lightbox-sized WebP (~1 MB) over the raw original
+  // (~27 MB). Falling back to thumb keeps something on screen if view ever 404s.
   const src = isUpload
     ? (item as Upload).view_url
-    : ((item as Photo).full_url ?? (item as Photo).thumb_url);
+    : ((item as Photo).view_url ?? (item as Photo).thumb_url);
   const uploaderName = isUpload ? (item as Upload).uploader_name : null;
 
   return (
