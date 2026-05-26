@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Heart, Camera, Navigation } from 'lucide-react';
-import { WEDDING_CONFIG } from './weddingConfig';
+import { WEDDING_CONFIG, mapsLinks, isLikelyChinaUser } from './weddingConfig';
 import ConfettiBurst from './ConfettiBurst';
 
 const { event, venue, dayOfMessages } = WEDDING_CONFIG;
@@ -26,9 +26,13 @@ const isIOS =
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 
+// Pick a maps service the user can actually reach: Apple on iOS, Baidu for CN,
+// Google everywhere else.
 const navigationUrl = isIOS
-  ? `https://maps.apple.com/?daddr=${encodeURIComponent(venue.address)}&ll=${venue.lat},${venue.lng}`
-  : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(venue.address)}`;
+  ? mapsLinks.apple
+  : isLikelyChinaUser()
+    ? mapsLinks.baidu
+    : mapsLinks.google;
 
 const startHour = parseInt(event.startTime.split(':')[0]);
 const startMin = event.startTime.split(':')[1];

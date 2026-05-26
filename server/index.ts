@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import compression from 'compression';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import multer from 'multer';
@@ -130,21 +131,34 @@ const galleryUpload = createImageUpload(galleryDir);
 
 const app = express();
 
-// #10: Security headers
+// Gzip/brotli compression. Cloudflare normally handles this, but if origin is
+// hit directly (CN bypass, alt CDN, etc.) we still want compressed responses.
+app.use(compression({
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  },
+  threshold: 1024,
+}));
+
+// #10: Security headers. CSP only lists hosts the browser must connect to /
+// load resources from — outbound navigation via <a target=_blank> doesn't need
+// to be allow-listed, so calendar.google.com / maps.google.com are gone.
+// Fonts are self-hosted; supabase is direct-uploaded to by the browser only.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      fontSrc: ["'self'", "data:"],
       imgSrc: ["'self'", "data:", "https:", "blob:"],
-      frameSrc: ["'self'", "https://maps.google.com", "https://www.google.com", "https://maps.googleapis.com"],
-      mediaSrc: ["'self'", "blob:", "https://*.supabase.co"],
-      connectSrc: ["'self'", "data:", "https://calendar.google.com", "https://maps.apple.com", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://*.supabase.co"],
+      frameSrc: ["'self'"],
+      mediaSrc: ["'self'", "blob:"],
+      connectSrc: ["'self'", "data:", "https://*.supabase.co"],
     },
   },
-  crossOriginEmbedderPolicy: false, // needed for Google Maps iframe
+  crossOriginEmbedderPolicy: false,
 }));
 
 // #8: CORS - restrict to same origin in production
@@ -631,6 +645,35 @@ async function fetchGroupPhotos(groupIds: string[]): Promise<PhotoRow[]> {
   return rows;
 }
 
+async function fetchGroupPhotosPaged(
+  groupIds: string[],
+  limit: number,
+  offset: number
+): Promise<PhotoRow[]> {
+  if (groupIds.length === 0) return [];
+  const { rows } = await getPg().query<PhotoRow>(
+    `select id, group_id, storage_path, thumbnail_path, file_name, width, height, sort_order
+       from photos where group_id = any($1::text[])
+       order by group_id, sort_order, id
+       limit $2 offset $3`,
+    [groupIds, limit, offset]
+  );
+  return rows;
+}
+
+async function countGroupPhotos(groupIds: string[]): Promise<Record<string, number>> {
+  if (groupIds.length === 0) return {};
+  const { rows } = await getPg().query<{ group_id: string; n: string }>(
+    `select group_id, count(*)::text as n
+       from photos where group_id = any($1::text[])
+       group by group_id`,
+    [groupIds]
+  );
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.group_id] = Number(r.n);
+  return out;
+}
+
 async function signPaths(paths: string[]): Promise<Record<string, string>> {
   if (paths.length === 0) return {};
   const { data, error } = await getSupabase().storage
@@ -659,6 +702,27 @@ type UploadRow = {
   created_at: string;
 };
 
+async function fetchPhotoById(id: string): Promise<PhotoRow | null> {
+  if (!id || typeof id !== 'string' || id.length > 128) return null;
+  const { rows } = await getPg().query<PhotoRow>(
+    `select id, group_id, storage_path, thumbnail_path, file_name, width, height, sort_order
+       from photos where id = $1`,
+    [id]
+  );
+  return rows[0] ?? null;
+}
+
+async function fetchUploadById(id: string): Promise<UploadRow | null> {
+  if (!id || typeof id !== 'string' || id.length > 128) return null;
+  const { rows } = await getPg().query<UploadRow>(
+    `select id, storage_path, thumbnail_path, file_name, media_type, mime_type, file_size,
+            width, height, duration_seconds, uploader_name, created_at
+       from uploaded_media where id = $1`,
+    [id]
+  );
+  return rows[0] ?? null;
+}
+
 async function fetchGuestUploads(limit = 500): Promise<UploadRow[]> {
   const { rows } = await getPg().query<UploadRow>(
     `select id, storage_path, thumbnail_path, file_name, media_type, mime_type, file_size,
@@ -671,13 +735,191 @@ async function fetchGuestUploads(limit = 500): Promise<UploadRow[]> {
   return rows;
 }
 
+// ---- Same-origin image proxy with on-disk cache ----
+// Supabase signed URLs are served with Cache-Control: no-cache, so every
+// browser revisit re-downloads every thumbnail (catastrophic from China where
+// the *.supabase.co edge is slow). The proxy below serves the same bytes from
+// the app origin with Cache-Control: immutable, so:
+//   - browsers cache thumbs forever (content-hashed implicitly by photo id)
+//   - Cloudflare / any CDN in front of us can cache them too
+//   - guests load the gallery once and pay no per-thumb cost on revisits
+const imgCacheDir = join(__dirname, 'cache', 'img');
+fs.mkdirSync(imgCacheDir, { recursive: true });
+
+const IMG_VARIANTS = new Set(['thumb', 'full']);
+const IMG_INFLIGHT = new Map<string, Promise<Buffer>>();
+
+function pickMime(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.heic') || lower.endsWith('.heif')) return 'image/heic';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  return 'application/octet-stream';
+}
+
+async function downloadFromSupabase(storagePath: string): Promise<Buffer> {
+  const { data, error } = await getSupabase().storage
+    .from(PHOTOS_BUCKET)
+    .download(storagePath);
+  if (error || !data) {
+    throw new Error(`supabase download failed: ${error?.message ?? 'no data'}`);
+  }
+  return Buffer.from(await data.arrayBuffer());
+}
+
+async function getCachedImage(cacheKey: string, storagePath: string): Promise<Buffer> {
+  const cachePath = join(imgCacheDir, cacheKey);
+  try {
+    return await fs.promises.readFile(cachePath);
+  } catch {
+    // cache miss, fall through
+  }
+  const existing = IMG_INFLIGHT.get(cacheKey);
+  if (existing) return existing;
+  const inflight = (async () => {
+    const buf = await downloadFromSupabase(storagePath);
+    // Write atomically: temp then rename, so a partial file is never read.
+    const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    await fs.promises.writeFile(tmp, buf);
+    await fs.promises.rename(tmp, cachePath);
+    return buf;
+  })().finally(() => IMG_INFLIGHT.delete(cacheKey));
+  IMG_INFLIGHT.set(cacheKey, inflight);
+  return inflight;
+}
+
+function sendCachedImage(res: express.Response, buf: Buffer, mime: string) {
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(buf);
+}
+
+// /img/p/:token/:variant/:photoId — proxy for curated wedding photos.
+// Token verifies the requester is allowed to see the photo's group.
+app.get('/img/p/:token/:variant/:photoId', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const { token, variant, photoId } = req.params;
+    if (!IMG_VARIANTS.has(variant)) { res.status(400).end(); return; }
+
+    const group = await fetchGroupByToken(token);
+    if (!group) { res.status(404).end(); return; }
+    const photo = await fetchPhotoById(photoId);
+    if (!photo) { res.status(404).end(); return; }
+
+    const isMaster = group.id === 'all';
+    if (!isMaster) {
+      const allowed = photo.group_id === 'couple' || photo.group_id === group.id;
+      if (!allowed) { res.status(403).end(); return; }
+    }
+
+    if (variant === 'full' && !isMaster && photo.group_id === 'couple') {
+      // Couple originals are not downloadable from per-group links.
+      // Thumbnails are still allowed so the lightbox can show a preview.
+      res.status(403).end();
+      return;
+    }
+
+    const storagePath = variant === 'thumb'
+      ? (photo.thumbnail_path || photo.storage_path)
+      : photo.storage_path;
+    const cacheKey = `p_${variant}_${photoId}`;
+    const buf = await getCachedImage(cacheKey, storagePath);
+    sendCachedImage(res, buf, pickMime(storagePath));
+  } catch (err) {
+    console.error('img proxy (photo) failed:', (err as Error).message);
+    res.status(502).end();
+  }
+});
+
+// /img/u/:token/:variant/:uploadId — proxy for guest-uploaded media.
+app.get('/img/u/:token/:variant/:uploadId', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const { token, variant, uploadId } = req.params;
+    if (!IMG_VARIANTS.has(variant)) { res.status(400).end(); return; }
+
+    const group = await fetchGroupByToken(token);
+    if (!group) { res.status(404).end(); return; }
+    const upload = await fetchUploadById(uploadId);
+    if (!upload) { res.status(404).end(); return; }
+
+    // Any valid token can view all guest uploads (they're shared with everyone
+    // who has gallery access). This matches the existing JSON behaviour.
+    const storagePath = variant === 'thumb'
+      ? (upload.thumbnail_path || upload.storage_path)
+      : upload.storage_path;
+    const cacheKey = `u_${variant}_${uploadId}`;
+    const buf = await getCachedImage(cacheKey, storagePath);
+    sendCachedImage(res, buf, pickMime(storagePath));
+  } catch (err) {
+    console.error('img proxy (upload) failed:', (err as Error).message);
+    res.status(502).end();
+  }
+});
+
+// Photos page size. Guests load this many at a time; with the IntersectionObserver
+// they get more as they scroll. 60 keeps the initial JSON small (~30 KB instead
+// of ~1 MB for 930 photos) without making the grid feel empty.
+const GALLERY_PAGE_SIZE = 60;
+const GALLERY_PAGE_MAX = 120;
+
+function buildProxyUrls(token: string) {
+  const t = encodeURIComponent(token);
+  return {
+    photoUrl: (variant: 'thumb' | 'full', id: string) =>
+      `/img/p/${t}/${variant}/${encodeURIComponent(id)}`,
+    uploadUrl: (variant: 'thumb' | 'full', id: string) =>
+      `/img/u/${t}/${variant}/${encodeURIComponent(id)}`,
+  };
+}
+
+function shapePhotoRow(
+  p: PhotoRow,
+  isMaster: boolean,
+  groupCanDownload: boolean,
+  proxy: ReturnType<typeof buildProxyUrls>
+) {
+  const isCouple = p.group_id === 'couple';
+  const canDownload = isMaster ? true : (isCouple ? false : groupCanDownload);
+  const allowFull = isMaster || !isCouple;
+  return {
+    id: p.id,
+    group_id: p.group_id,
+    file_name: p.file_name,
+    thumb_url: proxy.photoUrl('thumb', p.id),
+    full_url: allowFull ? proxy.photoUrl('full', p.id) : null,
+    width: p.width,
+    height: p.height,
+    can_download: canDownload,
+  };
+}
+
+function resolveSourceGroupIds(group: GroupRow): { sourceGroupIds: string[]; isMaster: boolean } {
+  const isMaster = group.id === 'all';
+  if (isMaster) return { sourceGroupIds: [], isMaster: true }; // resolved later via query
+  return { sourceGroupIds: ['couple', group.id], isMaster: false };
+}
+
 // Public: resolve a token and return everything the gallery page needs.
-// Response shape (used for both master 'all' link and per-group links):
+// Returns the FIRST page of photos (the client fetches more via /photos).
+// Guest uploads are typically <100 items so they're returned in full.
+// Response shape:
 //   {
 //     group:           { id, display_name, can_download, is_master },
-//     categories:      [{ id, display_name }],   // chips for the photos tab
-//     default_category: string | null,           // the chip to pre-select
+//     categories:      [{ id, display_name }],
+//     default_category: string | null,
 //     photos:          [{ id, group_id, file_name, thumb_url, width, height, can_download }],
+//     photos_total:    number,
+//     photos_offset:   number,
+//     photos_limit:    number,
 //     guest_uploads:   [{ id, media_type, file_name, thumb_url, view_url, ... }]
 //   }
 app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
@@ -700,7 +942,7 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       );
       sourceGroupIds = all.rows.map((r) => r.id);
       categories = all.rows;
-      defaultCategory = null; // show "All" by default
+      defaultCategory = null;
     } else {
       sourceGroupIds = ['couple', group.id];
       const all = await getPg().query<{ id: string; display_name: string }>(
@@ -713,88 +955,31 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       defaultCategory = group.id;
     }
 
-    const photoRows = await fetchGroupPhotos(sourceGroupIds);
-    const uploads = await fetchGuestUploads();
+    const [firstPage, counts, uploads] = await Promise.all([
+      fetchGroupPhotosPaged(sourceGroupIds, GALLERY_PAGE_SIZE, 0),
+      countGroupPhotos(sourceGroupIds),
+      fetchGuestUploads(),
+    ]);
+    const photosTotal = Object.values(counts).reduce((a, b) => a + b, 0);
 
-    // Sign both the thumbnail and the original for every photo so the lightbox
-    // can show the full-res original instead of the small thumbnail.
-    const pathsToSign = new Set<string>();
-    for (const p of photoRows) {
-      if (p.thumbnail_path) pathsToSign.add(p.thumbnail_path);
-      pathsToSign.add(p.storage_path);
-    }
-    for (const u of uploads) {
-      if (u.thumbnail_path) pathsToSign.add(u.thumbnail_path);
-      pathsToSign.add(u.storage_path);
-    }
-    const signed = await signPaths(Array.from(pathsToSign));
+    const proxy = buildProxyUrls(req.params.token);
+    const photos = firstPage.map((p) => shapePhotoRow(p, isMaster, group.can_download, proxy));
 
-    const photos = photoRows.map((p) => {
-      const isCouple = p.group_id === 'couple';
-      // Master link makes every category downloadable; regular link follows
-      // the group's flag for its own photos and view-only for couple.
-      const canDownload = isMaster ? true : (isCouple ? false : group.can_download);
-      const thumbKey = p.thumbnail_path || p.storage_path;
-      return {
-        id: p.id,
-        group_id: p.group_id,
-        file_name: p.file_name,
-        thumb_url: signed[thumbKey] || null,
-        full_url: signed[p.storage_path] || null,
-        width: p.width,
-        height: p.height,
-        can_download: canDownload,
-      };
-    });
-
-    // For guest-uploaded IMAGES we ask Supabase to deliver a resized version
-    // (width 600px, quality 70) via the image-transform signed-URL endpoint
-    // so the grid serves ~50–150 KB WebPs instead of 5–25 MB originals.
-    // The transform endpoint is per-call, so parallel them — but wrap each
-    // call in a try/catch so a single throw doesn't 500 the whole gallery
-    // (we fall back to the full-size signed URL for that one image).
-    const imageUploadThumbs = await Promise.all(
-      uploads.filter((u) => u.media_type === 'image').map(async (u) => {
-        try {
-          const { data, error } = await getSupabase().storage
-            .from(PHOTOS_BUCKET)
-            .createSignedUrl(u.storage_path, SIGNED_URL_TTL_SECONDS, {
-              transform: { width: 600, height: 600, resize: 'contain', quality: 70 },
-            });
-          if (error || !data) {
-            console.warn('transform signing returned error for', u.storage_path, error?.message);
-            return [u.id, null] as const;
-          }
-          return [u.id, data.signedUrl] as const;
-        } catch (err) {
-          console.warn('transform signing threw for', u.storage_path, (err as Error).message);
-          return [u.id, null] as const;
-        }
-      })
-    );
-    const transformThumbByUploadId = new Map(imageUploadThumbs);
-
-    const guestUploads = uploads.map((u) => {
-      const transformThumb = u.media_type === 'image' ? transformThumbByUploadId.get(u.id) : null;
-      return {
-        id: u.id,
-        media_type: u.media_type,
-        file_name: u.file_name,
-        mime_type: u.mime_type,
-        thumb_url: u.media_type === 'image'
-          ? (transformThumb ?? signed[u.storage_path] ?? null)
-          : (signed[u.storage_path] ?? null),
-        view_url: signed[u.storage_path] || null,
-        width: u.width,
-        height: u.height,
-        duration_seconds: u.duration_seconds,
-        file_size: u.file_size,
-        uploader_name: u.uploader_name,
-        created_at: u.created_at,
-        // Guest uploads are always downloadable from any link.
-        can_download: true,
-      };
-    });
+    const guestUploads = uploads.map((u) => ({
+      id: u.id,
+      media_type: u.media_type,
+      file_name: u.file_name,
+      mime_type: u.mime_type,
+      thumb_url: proxy.uploadUrl('thumb', u.id),
+      view_url: proxy.uploadUrl('full', u.id),
+      width: u.width,
+      height: u.height,
+      duration_seconds: u.duration_seconds,
+      file_size: u.file_size,
+      uploader_name: u.uploader_name,
+      created_at: u.created_at,
+      can_download: true,
+    }));
 
     res.json({
       group: {
@@ -806,11 +991,64 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       categories,
       default_category: defaultCategory,
       photos,
+      photos_total: photosTotal,
+      photos_offset: 0,
+      photos_limit: GALLERY_PAGE_SIZE,
       guest_uploads: guestUploads,
     });
   } catch (err) {
     console.error('Gallery access error:', err);
     res.status(500).json({ error: 'Failed to load gallery' });
+  }
+});
+
+// Pagination: subsequent pages of curated photos. Optional `category` filter.
+// Response: { photos, offset, limit, total }
+app.get('/api/gallery-access/:token/photos', galleryLimiter, async (req, res) => {
+  if (!galleryConfigured()) return notConfigured(res);
+  try {
+    const group = await fetchGroupByToken(req.params.token);
+    if (!group) { res.status(404).json({ error: 'Invalid or expired link' }); return; }
+    const { isMaster } = resolveSourceGroupIds(group);
+
+    const limit = Math.max(1, Math.min(GALLERY_PAGE_MAX, Number(req.query.limit) || GALLERY_PAGE_SIZE));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const category = typeof req.query.category === 'string' ? req.query.category : '';
+
+    // Resolve which groups this token + category combination can read.
+    let groupIds: string[];
+    if (isMaster) {
+      const all = await getPg().query<{ id: string }>(
+        `select id from photo_groups where id <> 'all'`
+      );
+      const all_ids = all.rows.map((r) => r.id);
+      if (category && all_ids.includes(category)) {
+        groupIds = [category];
+      } else {
+        groupIds = all_ids;
+      }
+    } else {
+      const allowed = new Set(['couple', group.id]);
+      if (category && allowed.has(category)) {
+        groupIds = [category];
+      } else {
+        groupIds = ['couple', group.id];
+      }
+    }
+
+    const [rows, counts] = await Promise.all([
+      fetchGroupPhotosPaged(groupIds, limit, offset),
+      countGroupPhotos(groupIds),
+    ]);
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+    const proxy = buildProxyUrls(req.params.token);
+    const photos = rows.map((p) => shapePhotoRow(p, isMaster, group.can_download, proxy));
+
+    res.json({ photos, offset, limit, total });
+  } catch (err) {
+    console.error('Gallery photos page error:', err);
+    res.status(500).json({ error: 'Failed to load photos' });
   }
 });
 
@@ -1633,8 +1871,50 @@ if (process.env.NODE_ENV === 'production') {
   });
 
   const distPath = join(__dirname, '..', 'dist');
-  app.use(express.static(distPath));
+
+  // Content-hashed assets — cache forever.
+  app.use('/assets', express.static(join(distPath, 'assets'), {
+    immutable: true,
+    maxAge: '1y',
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+  }));
+
+  // Fonts are referenced by content-hashed filenames in the bundled CSS, so they
+  // are effectively immutable too.
+  app.use('/fonts', express.static(join(distPath, 'fonts'), {
+    immutable: true,
+    maxAge: '1y',
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+  }));
+
+  // HTML cache strategy:
+  //   max-age=0           → browsers always revalidate (so a deploy is picked up
+  //                          on the very next request once CF expires it)
+  //   s-maxage=3600       → CF / any shared cache serves the HTML for 1 hour
+  //                          without hitting our origin (huge TTFB win in CN
+  //                          where CF→origin is the expensive hop)
+  //   stale-while-revalidate=86400 → for 24 h after expiry CF serves the stale
+  //                          copy instantly and refreshes in the background
+  // Safe because the HTML references content-hashed assets — even stale HTML
+  // points at /assets/ files that still exist forever (immutable).
+  const HTML_CACHE = 'public, max-age=0, s-maxage=3600, stale-while-revalidate=86400';
+
+  // Everything else in dist (audio, etc.) gets a shorter cache so updates roll out.
+  app.use(express.static(distPath, {
+    maxAge: '1h',
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', HTML_CACHE);
+      }
+    },
+  }));
+
   app.get('*', (_req, res) => {
+    res.setHeader('Cache-Control', HTML_CACHE);
     res.sendFile(join(distPath, 'index.html'));
   });
 }

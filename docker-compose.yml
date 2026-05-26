@@ -20,6 +20,10 @@ services:
       - wedding-photos:/app/server/wedding-photos
       - gallery-images:/app/server/gallery-images
       - cards:/app/server/cards
+      # /app/server/cache holds the same-origin thumbnail proxy disk cache;
+      # without a volume this would empty on every rebuild and every photo
+      # would go cold to Supabase again.
+      - img-cache:/app/server/cache
     networks:
       - traefik_network
     labels:
@@ -39,6 +43,7 @@ volumes:
   wedding-photos:
   gallery-images:
   cards:
+  img-cache:
 
 networks:
   traefik_network:

@@ -41,11 +41,15 @@ type GalleryResponse = {
   categories: Category[];
   default_category: string | null;
   photos: Photo[];
+  photos_total: number;
+  photos_offset: number;
+  photos_limit: number;
   guest_uploads: Upload[];
 };
 
 type Tab = 'photos' | 'uploads' | 'share';
 const BATCH = 30;
+const PAGE_SIZE = 60; // mirror server GALLERY_PAGE_SIZE — controls fetch chunk
 const ALL = 'all';
 const CALLIGRAPHY: React.CSSProperties = { fontFamily: 'var(--font-calligraphy), "Ma Shan Zheng", cursive' };
 
@@ -73,6 +77,14 @@ export default function Gallery() {
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3500);
   }, []);
 
+  // Pagination state — photos are streamed page-by-page from the server so the
+  // initial JSON stays tiny (~30 KB instead of ~1 MB for 900+ photos). The
+  // "ALL" view streams every group; a specific category streams only that group.
+  const [loadedByCategory, setLoadedByCategory] = useState<Record<string, Photo[]>>({});
+  const [totalByCategory, setTotalByCategory] = useState<Record<string, number>>({});
+  const [pageLoading, setPageLoading] = useState(false);
+  const inFlightPage = useRef<Promise<void> | null>(null);
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch(`/api/gallery-access/${encodeURIComponent(token)}`);
@@ -80,6 +92,8 @@ export default function Gallery() {
       if (!res.ok) { setStatus('error'); return; }
       const j: GalleryResponse = await res.json();
       setData(j);
+      setLoadedByCategory({ [ALL]: j.photos });
+      setTotalByCategory({ [ALL]: j.photos_total });
       const fromUrl = new URLSearchParams(window.location.search).get('category');
       if (!fromUrl && j.default_category) setCategory(j.default_category);
       setStatus('ready');
@@ -104,15 +118,54 @@ export default function Gallery() {
 
   useEffect(() => { setVisibleCount(BATCH); }, [tab, category]);
 
+  // When the user picks a category we haven't fetched yet, kick off the first
+  // page for it. The "all" bucket is seeded by the initial gallery-access call.
+  const loadPhotosPage = useCallback(async (cat: string, offset: number) => {
+    if (!token) return;
+    if (inFlightPage.current) return inFlightPage.current;
+    setPageLoading(true);
+    const params = new URLSearchParams({ offset: String(offset), limit: String(PAGE_SIZE) });
+    if (cat !== ALL) params.set('category', cat);
+    const p = (async () => {
+      try {
+        const res = await fetch(`/api/gallery-access/${encodeURIComponent(token)}/photos?${params}`);
+        if (!res.ok) return;
+        const j: { photos: Photo[]; offset: number; limit: number; total: number } = await res.json();
+        setLoadedByCategory((prev) => {
+          const existing = prev[cat] ?? [];
+          // De-dup by id — a slow network can race two observer fires.
+          const seen = new Set(existing.map((x) => x.id));
+          const merged = [...existing];
+          for (const photo of j.photos) if (!seen.has(photo.id)) merged.push(photo);
+          return { ...prev, [cat]: merged };
+        });
+        setTotalByCategory((prev) => ({ ...prev, [cat]: j.total }));
+      } finally {
+        setPageLoading(false);
+        inFlightPage.current = null;
+      }
+    })();
+    inFlightPage.current = p;
+    return p;
+  }, [token]);
+
+  useEffect(() => {
+    if (!data || tab !== 'photos') return;
+    if (loadedByCategory[category] !== undefined) return; // already (partially) loaded
+    loadPhotosPage(category, 0);
+  }, [data, tab, category, loadedByCategory, loadPhotosPage]);
+
   const filteredPhotos = useMemo(() => {
     if (!data) return [];
-    if (category === ALL) return data.photos;
-    return data.photos.filter((p) => p.group_id === category);
-  }, [data, category]);
+    return loadedByCategory[category] ?? [];
+  }, [data, category, loadedByCategory]);
+
+  const categoryTotal = totalByCategory[category] ?? filteredPhotos.length;
 
   const currentList: (Photo | Upload)[] = tab === 'uploads' ? (data?.guest_uploads ?? []) : filteredPhotos;
+  const totalLength = tab === 'uploads' ? (data?.guest_uploads.length ?? 0) : categoryTotal;
   const visible = currentList.slice(0, visibleCount);
-  const canLoadMore = visible.length < currentList.length;
+  const canLoadMore = visible.length < currentList.length || (tab === 'photos' && filteredPhotos.length < categoryTotal);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   // Keep the observer stable across list-length changes (which fire on every
@@ -126,14 +179,20 @@ export default function Gallery() {
     const ob = new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (entry.isIntersecting) {
-          setVisibleCount((c) => c + BATCH);
+          // First: try to grow the visible window from already-loaded photos.
+          if (visible.length < currentList.length) {
+            setVisibleCount((c) => c + BATCH);
+          } else if (tab === 'photos' && filteredPhotos.length < categoryTotal) {
+            // Otherwise: fetch the next server page for this category.
+            loadPhotosPage(category, filteredPhotos.length);
+          }
           break;
         }
       }
     }, { rootMargin: '600px 0px' });
     ob.observe(el);
     return () => ob.disconnect();
-  }, [canLoadMore, tab]);
+  }, [canLoadMore, tab, category, visible.length, currentList.length, filteredPhotos.length, categoryTotal, loadPhotosPage]);
 
   const downloadIds = useCallback(async (
     photoIds: string[],

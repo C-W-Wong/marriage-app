@@ -1,5 +1,12 @@
 import { MapPin, Calendar, Download } from 'lucide-react';
-import { WEDDING_CONFIG, downloadICS, googleCalendarUrl } from './weddingConfig';
+import {
+  WEDDING_CONFIG,
+  downloadICS,
+  googleCalendarUrl,
+  outlookCalendarUrl,
+  mapsLinks,
+  isLikelyChinaUser,
+} from './weddingConfig';
 
 const { venue } = WEDDING_CONFIG;
 
@@ -7,7 +14,8 @@ const addressParts = venue.address.split(', ');
 const addressLine1 = addressParts[0];
 const addressLine2 = addressParts.slice(1).join(', ');
 
-const mapEmbedUrl = `https://www.google.com/maps?q=${venue.lat},${venue.lng}&z=16&output=embed`;
+// Resolved at first render — no network hit, no iframe, no Google Maps block on CN.
+const cnUser = isLikelyChinaUser();
 
 function handleNavigate() {
   const ua = navigator.userAgent;
@@ -16,11 +24,10 @@ function handleNavigate() {
 
   if (isIOS) {
     window.location.href = `maps://maps.apple.com/?daddr=${encodeURIComponent(venue.address)}`;
+  } else if (cnUser) {
+    window.open(mapsLinks.baidu, '_blank', 'noopener,noreferrer');
   } else {
-    window.open(
-      `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(venue.address)}`,
-      '_blank'
-    );
+    window.open(mapsLinks.google, '_blank', 'noopener,noreferrer');
   }
 }
 
@@ -30,7 +37,6 @@ export default function VenueCalendarCard() {
       <div className="w-14 h-14 rounded-full bg-[#8b0000]/5 flex items-center justify-center mb-5">
         <MapPin size={24} className="text-[#8b0000]" />
       </div>
-      {/* #14/#17: Bold courthouse name as title */}
       <h3 className="text-lg md:text-xl font-serif font-bold text-[#8b6914] mb-2 uppercase tracking-wider">
         {venue.name}
       </h3>
@@ -39,21 +45,51 @@ export default function VenueCalendarCard() {
         {addressLine1}<br />{addressLine2}
       </p>
 
-      {/* #1: Embedded Google Map */}
-      <div className="w-full mt-6 rounded-xl overflow-hidden border border-[#c5a059]/20">
-        <iframe
-          src={mapEmbedUrl}
-          width="100%"
-          height="200"
-          style={{ border: 0 }}
-          allowFullScreen
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          title="Venue Location"
-        />
+      {/* Static styled location card — replaces the iframe (Google Maps is blocked in CN). */}
+      <div className="w-full mt-6 rounded-xl border border-[#c5a059]/20 bg-gradient-to-br from-[#fdfaf6] to-[#f5ede0] py-6 px-4 flex flex-col items-center">
+        <MapPin size={28} className="text-[#8b0000]/80 mb-2" />
+        <p className="text-xs font-serif uppercase tracking-[0.2em] text-[#8b6914]">
+          {venue.lat.toFixed(4)}° N, {Math.abs(venue.lng).toFixed(4)}° W
+        </p>
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+          <a
+            href={mapsLinks.apple}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-serif px-3 py-1.5 rounded-full border border-[#c5a059]/40 hover:bg-[#c5a059]/10 transition-colors"
+          >
+            Apple Maps
+          </a>
+          {cnUser ? (
+            <a
+              href={mapsLinks.baidu}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-serif px-3 py-1.5 rounded-full border border-[#c5a059]/40 hover:bg-[#c5a059]/10 transition-colors"
+            >
+              百度地图
+            </a>
+          ) : (
+            <a
+              href={mapsLinks.google}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-serif px-3 py-1.5 rounded-full border border-[#c5a059]/40 hover:bg-[#c5a059]/10 transition-colors"
+            >
+              Google Maps
+            </a>
+          )}
+          <a
+            href={mapsLinks.osm}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-serif px-3 py-1.5 rounded-full border border-[#c5a059]/40 hover:bg-[#c5a059]/10 transition-colors"
+          >
+            OpenStreetMap
+          </a>
+        </div>
       </div>
 
-      {/* #7: Navigate button — uses window.location for iOS Maps app */}
       <button
         onClick={handleNavigate}
         className="mt-5 inline-flex items-center justify-center gap-2 px-6 py-3 bg-[#8b0000] text-white rounded-full font-serif text-sm uppercase tracking-widest hover:bg-[#a00000] transition-colors"
@@ -82,20 +118,35 @@ export default function VenueCalendarCard() {
             <span className="text-xs font-serif text-[#1a1a1a]">Apple</span>
           </button>
 
-          <a
-            href={googleCalendarUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex flex-col items-center justify-center gap-2 px-3 py-3.5 rounded-xl border border-[#c5a059]/20 hover:border-[#c5a059]/40 hover:bg-[#fdfaf6] transition-all"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-            </svg>
-            <span className="text-xs font-serif text-[#1a1a1a]">Google</span>
-          </a>
+          {cnUser ? (
+            <a
+              href={outlookCalendarUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col items-center justify-center gap-2 px-3 py-3.5 rounded-xl border border-[#c5a059]/20 hover:border-[#c5a059]/40 hover:bg-[#fdfaf6] transition-all"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="#0078d4" aria-hidden="true">
+                <path d="M21.17 4H10.83A1.83 1.83 0 0 0 9 5.83v.84L4 8.17V18a.83.83 0 0 0 .61.8L9 19.91v.26A1.83 1.83 0 0 0 10.83 22h10.34A1.83 1.83 0 0 0 23 20.17V5.83A1.83 1.83 0 0 0 21.17 4M9 17.93l-3-.83V9l3-.6Zm12 2.07a.5.5 0 0 1-.5.5H10.83a.5.5 0 0 1-.5-.5v-.74l5-1.43A.83.83 0 0 0 16 17V8a.83.83 0 0 0-.61-.8L10.33 5.74v-.07a.5.5 0 0 1 .5-.5h10.34a.5.5 0 0 1 .5.5Z" />
+                <circle cx="7" cy="13" r="2" fill="#fff" />
+              </svg>
+              <span className="text-xs font-serif text-[#1a1a1a]">Outlook</span>
+            </a>
+          ) : (
+            <a
+              href={googleCalendarUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col items-center justify-center gap-2 px-3 py-3.5 rounded-xl border border-[#c5a059]/20 hover:border-[#c5a059]/40 hover:bg-[#fdfaf6] transition-all"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+              </svg>
+              <span className="text-xs font-serif text-[#1a1a1a]">Google</span>
+            </a>
+          )}
 
           <button
             onClick={downloadICS}

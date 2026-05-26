@@ -89,7 +89,7 @@ const TypingEffect = ({ text, speed = 100, onComplete }: { text: string, speed?:
   const typingAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    const audio = new Audio('/keyboard-typing.wav');
+    const audio = new Audio('/keyboard-typing.mp3');
     audio.volume = 0.5;
     typingAudioRef.current = audio;
 
@@ -457,15 +457,6 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const guestBookScrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    // Defer audio preload until after initial render
-    const id = setTimeout(() => {
-      const preload = new Audio('/keyboard-typing.wav');
-      preload.preload = 'auto';
-      preload.load();
-    }, 500);
-    return () => clearTimeout(id);
-  }, []);
   const [trackIndex, setTrackIndex] = useState(0);
 
   useEffect(() => {

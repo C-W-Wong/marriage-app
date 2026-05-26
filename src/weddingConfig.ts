@@ -65,4 +65,46 @@ export const googleCalendarUrl = (() => {
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 })();
 
+export const outlookCalendarUrl = (() => {
+  // outlook.live.com works globally including from mainland China.
+  const isoStart = `${event.date}T${event.startTime}:00`;
+  const isoEnd = `${event.date}T${event.endTime}:00`;
+  const params = new URLSearchParams({
+    path: '/calendar/action/compose',
+    rru: 'addevent',
+    subject: event.title,
+    startdt: isoStart,
+    enddt: isoEnd,
+    location: `${venue.name}, ${venue.address}`,
+    body: event.description,
+  });
+  return `https://outlook.live.com/calendar/0/deeplink/compose?${params.toString()}`;
+})();
+
+// Direct deep-links to common map apps. Apple Maps + Baidu both work in China;
+// Google Maps does not, so we pick the right default for CN visitors.
+export const mapsLinks = {
+  apple: `https://maps.apple.com/?daddr=${encodeURIComponent(venue.address)}&ll=${venue.lat},${venue.lng}`,
+  google: `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(venue.address)}`,
+  // Baidu's marker API expects WGS84 coordinates wrapped in the right query keys.
+  baidu: `https://api.map.baidu.com/marker?location=${venue.lat},${venue.lng}&title=${encodeURIComponent(venue.name)}&content=${encodeURIComponent(venue.address)}&output=html&coord_type=wgs84`,
+  osm: `https://www.openstreetmap.org/?mlat=${venue.lat}&mlon=${venue.lng}&zoom=16#map=16/${venue.lat}/${venue.lng}`,
+};
+
+// Best-effort heuristic for "user is likely on a Chinese network where Google
+// services are blocked". navigator.language is the most reliable client-side
+// signal; timezone is a fallback that catches a few VPN/expat cases.
+export function isLikelyChinaUser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const lang = (navigator.language || '').toLowerCase();
+  if (lang.startsWith('zh-cn') || lang === 'zh' || lang.startsWith('zh-hans')) return true;
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    if (tz === 'Asia/Shanghai' || tz === 'Asia/Chongqing' || tz === 'Asia/Urumqi') return true;
+  } catch {
+    // ignore — older browsers without Intl
+  }
+  return false;
+}
+
 export const weddingDate = new Date(`${event.date}T00:00:00-07:00`);
