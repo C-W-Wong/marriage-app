@@ -933,6 +933,14 @@ function resolveSourceGroupIds(group: GroupRow): { sourceGroupIds: string[]; isM
   return { sourceGroupIds: ['couple', group.id], isMaster: false };
 }
 
+// API responses are token-keyed and reflect live schema; CF Page Rules with
+// "Cache Everything" would otherwise serve stale JSON across deploys. `private`
+// keeps it out of shared caches, and a short max-age still lets browsers
+// dedupe rapid reloads.
+function setApiCacheHeaders(res: express.Response) {
+  res.setHeader('Cache-Control', 'private, max-age=10, must-revalidate');
+}
+
 // Public: resolve a token and return everything the gallery page needs.
 // Returns the FIRST page of photos (the client fetches more via /photos).
 // Guest uploads are typically <100 items so they're returned in full.
@@ -1012,6 +1020,7 @@ app.get('/api/gallery-access/:token', galleryLimiter, async (req, res) => {
       };
     });
 
+    setApiCacheHeaders(res);
     res.json({
       group: {
         id: group.id,
@@ -1076,6 +1085,7 @@ app.get('/api/gallery-access/:token/photos', galleryLimiter, async (req, res) =>
     const proxy = buildProxyUrls(req.params.token);
     const photos = rows.map((p) => shapePhotoRow(p, isMaster, group.can_download, proxy));
 
+    setApiCacheHeaders(res);
     res.json({ photos, offset, limit, total });
   } catch (err) {
     console.error('Gallery photos page error:', err);
